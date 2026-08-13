@@ -1,0 +1,17 @@
+-- Migration 003: preparación para BetterAuth (NO EJECUTAR AÚN)
+--
+-- Cuando se integre BetterAuth, esta migración:
+-- 1. Creará la tabla de usuarios gestionada por BetterAuth (o adaptará la existente)
+-- 2. Eliminará la FK a auth.users en profiles y documents
+-- 3. Eliminará el trigger on_auth_user_created
+-- 4. Actualizará políticas RLS y de Storage para no depender de auth.uid()
+--
+-- El esquema actual (001) fue diseñado con Supabase Auth como referencia temporal.
+-- El backend accede a la BD con service_role, por lo que RLS no bloquea operaciones del API.
+
+-- Ejemplo orientativo (ajustar según esquema final de BetterAuth):
+--
+-- ALTER TABLE public.profiles DROP CONSTRAINT profiles_id_fkey;
+-- ALTER TABLE public.documents DROP CONSTRAINT documents_user_id_fkey;
+-- DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+-- DROP FUNCTION IF EXISTS public.handle_new_user();
