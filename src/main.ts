@@ -1,13 +1,14 @@
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { GlobalExceptionFilter } from './common/filters/global-exception.filter';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, {
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     logger: ['error', 'warn', 'log'],
   });
 
@@ -17,6 +18,10 @@ async function bootstrap() {
   const corsOrigins = config.get<string[]>('app.corsOrigins', []);
 
   app.setGlobalPrefix(apiPrefix);
+
+  // La auditoría de firma registra la IP del firmante. Detrás de un proxy o
+  // balanceador, sin esto se guardaría la del proxy y la evidencia no serviría.
+  app.set('trust proxy', 1);
 
   app.use(
     helmet({

@@ -32,14 +32,18 @@ cp .env.example .env
 | `SUPABASE_SERVICE_ROLE_KEY` | Clave service role (**solo servidor**) |
 | `CORS_ORIGINS` | Orígenes del frontend separados por coma |
 
-3. Aplica migraciones en Supabase SQL Editor:
+3. Aplica migraciones en Supabase SQL Editor, en orden:
 
 ```
 supabase/migrations/001_initial_schema.sql
 supabase/migrations/002_storage_bucket.sql
+supabase/migrations/004_envelopes.sql
+supabase/migrations/005_tokens_audit.sql
+supabase/migrations/006_verification_v2.sql
 ```
 
 > Las migraciones `001` y `002` ya están aplicadas en el proyecto vinculado.
+> La `003` es solo un guion de referencia para BetterAuth y no se ejecuta.
 
 ## Desarrollo
 
@@ -61,6 +65,21 @@ npm run start:dev
 | GET | `/api/v1/health` | Health check |
 | GET | `/api/v1/verify/:code` | Verificar documento por código |
 
+### Portal de firma (públicos, autenticados por enlace + código)
+
+El firmante externo no tiene cuenta: se identifica con el enlace único que
+recibe por correo más un código de un solo uso.
+
+| Método | Ruta | Límite |
+|--------|------|--------|
+| GET | `/api/v1/sign/:token` | 30/min |
+| POST | `/api/v1/sign/:token/otp/request` | 3 / 10 min |
+| POST | `/api/v1/sign/:token/otp/verify` | 10 / 10 min |
+| GET | `/api/v1/sign/session/me` | 60/min |
+| GET | `/api/v1/sign/session/document` | 20/min |
+| POST | `/api/v1/sign/session/submit` | 5/min |
+| POST | `/api/v1/sign/session/decline` | 5/min |
+
 ### Protegidos (requieren BetterAuth — pendiente)
 
 | Método | Ruta | Descripción |
@@ -69,9 +88,17 @@ npm run start:dev
 | GET | `/api/v1/documents` | Listar documentos |
 | POST | `/api/v1/documents` | Subir PDF (`multipart/form-data`) |
 | GET | `/api/v1/documents/:id` | Detalle |
-| POST | `/api/v1/documents/:id/sign` | Registrar firma + PDF firmado |
+| POST | `/api/v1/documents/:id/sign` | **Obsoleto**: acepta el PDF ya firmado sin validarlo |
 | GET | `/api/v1/documents/:id/download` | URL firmada de descarga |
 | DELETE | `/api/v1/documents/:id` | Eliminar documento |
+| POST | `/api/v1/envelopes` | Crear sobre con firmantes y campos |
+| GET | `/api/v1/envelopes` | Listar sobres |
+| GET | `/api/v1/envelopes/:id` | Detalle con firmantes y campos |
+| PATCH | `/api/v1/envelopes/:id` | Modificar (solo en borrador) |
+| POST | `/api/v1/envelopes/:id/send` | Emitir enlaces y enviar a firma |
+| DELETE | `/api/v1/envelopes/:id` | Anular y revocar enlaces |
+| GET | `/api/v1/envelopes/:id/download` | `?type=original\|current\|final` |
+| GET | `/api/v1/envelopes/:id/audit` | Traza de auditoría |
 
 > Mientras BetterAuth no esté integrado, las rutas protegidas responden **503** con el mensaje `Autenticación pendiente: BetterAuth será integrado próximamente`.
 
@@ -117,14 +144,41 @@ src/
     └── health/
 ```
 
-## Flujo de firma (cuando auth esté listo)
+## Flujo de firma multi-parte
 
-1. Frontend autentica con **BetterAuth**
-2. Frontend sube PDF original → `POST /documents`
-3. Frontend firma localmente con pdf-lib
-4. Frontend envía PDF firmado en base64 → `POST /documents/:id/sign`
-5. Backend guarda en Storage y registra `verification_code`
-6. Cualquiera puede verificar en `/verify/:code`
+1. El emisor sube el PDF → `POST /documents`
+2. El frontend analiza el documento y propone las zonas de firma
+3. El emisor define firmantes y campos → `POST /envelopes`
+4. `POST /envelopes/:id/send` emite un enlace único por firmante
+5. Cada firmante abre su enlace, pide un código al correo y lo canjea por una
+   sesión corta
+6. `POST /sign/session/submit` envía **solo la imagen de la firma**: el servidor
+   resuelve las coordenadas y estampa
+7. Al firmar el último se añade la hoja de certificación, se asigna el código de
+   verificación y se calcula el hash final
+8. Cualquiera puede verificar en `/verify/:code`, incluido el SHA-256
+
+### El estampado ocurre en el servidor
+
+`POST /documents/:id/sign` aceptaba un `signedPdfBase64` arbitrario y lo
+guardaba sin comprobar nada: cualquier cliente podía subir el documento que
+quisiera y quedaba marcado como verificado. En el flujo de sobres el cliente
+solo envía la imagen de la firma, y el PDF resultante lo produce el servidor.
+
+### Firma incremental
+
+Cada firmante estampa sobre la versión que dejó el anterior, de modo que ve las
+firmas previas. Cada paso queda registrado en `envelope_versions` con su propio
+hash, lo que da una cadena de custodia comprobable. El índice único
+`(envelope_id, version)` protege del caso en que dos firmantes en modo paralelo
+envíen a la vez.
+
+## Alcance de la firma
+
+Esto es **firma electrónica simple con evidencia auditable**: imagen de firma,
+identificación por enlace y código al correo, registro de IP y hora, y hash del
+documento. No es PAdES: no hay certificado digital ni firma criptográfica
+embebida en el PDF.
 
 ## Producción
 
@@ -137,6 +191,10 @@ Configura `CORS_ORIGINS` con tu dominio de Vercel y despliega en Railway, Render
 
 ## Roadmap
 
+- [ ] Envío real de correos (hoy el código de un solo uso se escribe en el log
+      del servidor; sin proveedor, el portal no es usable en producción)
+- [ ] `@pdf-lib/fontkit` para nombres fuera de WinAnsi (hoy se sustituyen)
+- [ ] Caducidad automática de sobres (`expires_at` se guarda pero no hay cron)
 - [ ] Integrar BetterAuth
 - [ ] Migración de esquema para usuarios independientes de Supabase Auth
 - [ ] Integrar frontend con esta API
