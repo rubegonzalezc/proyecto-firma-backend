@@ -8,4 +8,25 @@ export const envValidationSchema = Joi.object({
   SUPABASE_URL: Joi.string().uri().required(),
   SUPABASE_SERVICE_ROLE_KEY: Joi.string().required(),
   APP_VERIFY_BASE_URL: Joi.string().uri().optional(),
+  APP_PORTAL_BASE_URL: Joi.string().uri().optional(),
+
+  // El portal de firma emite sesiones y guarda hashes con pepper. Con valores
+  // por defecto en producción, cualquiera podría falsificar una sesión de
+  // firmante o romper los códigos por fuerza bruta, así que ahí son
+  // obligatorios y de longitud mínima.
+  SIGNER_JWT_SECRET: Joi.string().min(32).when('NODE_ENV', {
+    is: 'production',
+    then: Joi.required(),
+    otherwise: Joi.optional(),
+  }),
+  OTP_PEPPER: Joi.string().min(16).when('NODE_ENV', {
+    is: 'production',
+    then: Joi.required(),
+    otherwise: Joi.optional(),
+  }),
+  TOKEN_PEPPER: Joi.string().min(16).when('NODE_ENV', {
+    is: 'production',
+    then: Joi.required(),
+    otherwise: Joi.optional(),
+  }),
 });
