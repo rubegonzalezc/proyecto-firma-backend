@@ -88,7 +88,7 @@ export class VerificationService {
     return data?.id ?? null;
   }
 
-  private async verifyEnvelope(code: string, request?: Request) {
+  private async verifyEnvelope(code: string, _request?: Request) {
     const { data, error } = await this.supabase.admin
       .from('envelope_verifications')
       .select('*')
