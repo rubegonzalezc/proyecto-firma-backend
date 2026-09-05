@@ -23,6 +23,37 @@ function matches(row: Row, filters: Filter[]): boolean {
   });
 }
 
+class InsertBuilder {
+  private inserted: Row[] = [];
+
+  constructor(
+    private readonly db: SupabaseFake,
+    private readonly table: string,
+    payload: Row | Row[],
+  ) {
+    const list = Array.isArray(payload) ? payload : [payload];
+    for (const row of list) {
+      const stored = { id: row.id ?? crypto.randomUUID(), ...row };
+      this.db.rows(table).push(stored);
+      this.inserted.push(stored);
+    }
+  }
+
+  select(_columns = '*') {
+    return this;
+  }
+
+  async single() {
+    return this.inserted.length === 1
+      ? { data: this.inserted[0], error: null }
+      : { data: null, error: { message: 'no single row' } };
+  }
+
+  then(onFulfilled: (value: { data: Row[]; error: null }) => any) {
+    return Promise.resolve({ data: this.inserted, error: null }).then(onFulfilled);
+  }
+}
+
 class QueryBuilder {
   private filters: Filter[] = [];
   private orderColumn: string | null = null;
@@ -128,6 +159,17 @@ export class SupabaseFake {
   /** Fuerza un fallo de inserción, para probar colisiones de índice único. */
   public failNextInsert = false;
 
+  readonly storage = {
+    from: () => ({
+      upload: async () => ({ error: null }),
+      createSignedUrl: async (_path: string, _expires: number) => ({
+        data: { signedUrl: 'https://example.com/file.pdf' },
+        error: null,
+      }),
+      remove: async () => ({ error: null }),
+    }),
+  };
+
   rows(table: string): Row[] {
     if (!this.tables.has(table)) this.tables.set(table, []);
     return this.tables.get(table)!;
@@ -148,19 +190,22 @@ export class SupabaseFake {
         const embedMatch = columns.match(/,\s*(\w+)\(/);
         return new QueryBuilder(this, table, 'select', undefined, embedMatch?.[1]);
       },
-      insert: async (payload: Row | Row[]) => {
+      insert: (payload: Row | Row[]) => {
         if (this.failNextInsert) {
           this.failNextInsert = false;
-          return {
+          const failed = {
             data: null,
             error: { message: 'duplicate key value violates unique constraint' },
           };
+          return {
+            select: () => ({
+              single: async () => failed,
+            }),
+            then: (onFulfilled: (value: typeof failed) => unknown) =>
+              Promise.resolve(failed).then(onFulfilled),
+          };
         }
-        const list = Array.isArray(payload) ? payload : [payload];
-        for (const row of list) {
-          this.rows(table).push({ id: row.id ?? crypto.randomUUID(), ...row });
-        }
-        return { data: list, error: null };
+        return new InsertBuilder(this, table, payload);
       },
       update: (payload: Row) => new QueryBuilder(this, table, 'update', payload),
       delete: () => new QueryBuilder(this, table, 'delete'),

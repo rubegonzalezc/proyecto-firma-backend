@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'feature/**']
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+        env:
+          CORS_ORIGINS: http://localhost:5173
+          SUPABASE_URL: https://example.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: test-service-role-key
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          BETTER_AUTH_SECRET: test-secret-with-at-least-32-characters-long
+          BETTER_AUTH_URL: http://localhost:3000
+      - run: npm test
+        env:
+          CORS_ORIGINS: http://localhost:5173
+          SUPABASE_URL: https://example.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: test-service-role-key
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          BETTER_AUTH_SECRET: test-secret-with-at-least-32-characters-long
+          BETTER_AUTH_URL: http://localhost:3000

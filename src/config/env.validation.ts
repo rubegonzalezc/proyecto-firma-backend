@@ -7,6 +7,9 @@ export const envValidationSchema = Joi.object({
   CORS_ORIGINS: Joi.string().required(),
   SUPABASE_URL: Joi.string().uri().required(),
   SUPABASE_SERVICE_ROLE_KEY: Joi.string().required(),
+  DATABASE_URL: Joi.string().required(),
+  BETTER_AUTH_SECRET: Joi.string().min(32).required(),
+  BETTER_AUTH_URL: Joi.string().uri().default('http://localhost:3000'),
   APP_VERIFY_BASE_URL: Joi.string().uri().optional(),
   APP_PORTAL_BASE_URL: Joi.string().uri().optional(),
 

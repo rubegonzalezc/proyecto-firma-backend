@@ -9,6 +9,7 @@ import {
   UploadedFile,
   UseInterceptors,
   Query,
+  Req,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import {
@@ -19,6 +20,7 @@ import {
   ApiQuery,
   ApiTags,
 } from '@nestjs/swagger';
+import type { Request } from 'express';
 import { memoryStorage } from 'multer';
 import { CurrentUser } from '../../common/decorators/auth.decorators';
 import type { AuthUser } from '../../common/types/database.types';
@@ -58,8 +60,12 @@ export class DocumentsController {
       limits: { fileSize: 20 * 1024 * 1024 },
     }),
   )
-  create(@CurrentUser() user: AuthUser, @UploadedFile() file: Express.Multer.File) {
-    return this.documentsService.create(user, file);
+  create(
+    @CurrentUser() user: AuthUser,
+    @UploadedFile() file: Express.Multer.File,
+    @Req() request: Request,
+  ) {
+    return this.documentsService.create(user, file, request);
   }
 
   @Post(':id/sign')
@@ -68,8 +74,9 @@ export class DocumentsController {
     @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: SignDocumentDto,
+    @Req() request: Request,
   ) {
-    return this.documentsService.sign(user, id, dto);
+    return this.documentsService.sign(user, id, dto, request);
   }
 
   @Get(':id/download')
@@ -79,8 +86,9 @@ export class DocumentsController {
     @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Query('type') type: 'original' | 'signed' = 'signed',
+    @Req() request: Request,
   ) {
-    return this.documentsService.getDownloadUrl(user, id, type);
+    return this.documentsService.getDownloadUrl(user, id, type, request);
   }
 
   @Delete(':id')

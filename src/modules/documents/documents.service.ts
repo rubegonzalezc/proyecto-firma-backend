@@ -4,17 +4,23 @@ import {
   NotFoundException,
   ForbiddenException,
 } from '@nestjs/common';
+import type { Request } from 'express';
 import { randomBytes, randomUUID } from 'crypto';
 import type { AuthUser } from '../../common/types/database.types';
 import type { DocumentRow } from '../../common/types/database.types';
+import { sha256Hex } from '../../common/utils/hash';
 import { SupabaseService } from '../../infrastructure/supabase/supabase.service';
+import { DocumentAuditService } from '../audit/document-audit.service';
 import type { SignDocumentDto } from './dto/document.dto';
 
 const MAX_PDF_BYTES = 20 * 1024 * 1024; // 20 MB
 
 @Injectable()
 export class DocumentsService {
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly documentAudit: DocumentAuditService,
+  ) {}
 
   private storagePath(userId: string, documentId: string, filename: string): string {
     return `${userId}/${documentId}/${filename}`;
@@ -35,6 +41,7 @@ export class DocumentsService {
       signerName: row.signer_name,
       signerEmail: row.signer_email,
       verificationCode: row.verification_code,
+      signedSha256: row.signed_sha256,
       createdAt: row.created_at,
       signedAt: row.signed_at,
     };
@@ -56,7 +63,7 @@ export class DocumentsService {
     return this.mapDocument(doc);
   }
 
-  async create(user: AuthUser, file: Express.Multer.File) {
+  async create(user: AuthUser, file: Express.Multer.File, request?: Request) {
     if (!file) throw new BadRequestException('Archivo PDF requerido');
     if (file.mimetype !== 'application/pdf') {
       throw new BadRequestException('Solo se permiten archivos PDF');
@@ -67,6 +74,7 @@ export class DocumentsService {
 
     const documentId = randomUUID();
     const path = this.storagePath(user.id, documentId, 'original.pdf');
+    const verificationCode = this.generateVerificationCode();
 
     const { error: uploadError } = await this.supabase.admin.storage
       .from(this.supabase.documentsBucket)
@@ -85,15 +93,25 @@ export class DocumentsService {
         name: file.originalname,
         original_pdf_path: path,
         status: 'draft',
+        verification_code: verificationCode,
       })
       .select('*')
       .single();
 
     if (error) throw error;
+
+    await this.documentAudit.record({
+      documentId,
+      userId: user.id,
+      eventType: 'document.created',
+      request,
+      metadata: { name: file.originalname, size: file.size },
+    });
+
     return this.mapDocument(data as DocumentRow);
   }
 
-  async sign(user: AuthUser, id: string, dto: SignDocumentDto) {
+  async sign(user: AuthUser, id: string, dto: SignDocumentDto, request?: Request) {
     const doc = await this.getOwnedDocument(user.id, id);
 
     if (doc.status === 'signed') {
@@ -105,9 +123,14 @@ export class DocumentsService {
       throw new BadRequestException('PDF firmado inválido');
     }
 
-    const verificationCode = dto.verificationCode?.toUpperCase() ?? this.generateVerificationCode();
+    if (pdfBuffer.subarray(0, 4).toString() !== '%PDF') {
+      throw new BadRequestException('El archivo firmado no es un PDF válido');
+    }
+
+    const verificationCode = doc.verification_code ?? this.generateVerificationCode();
     const signedPath = this.storagePath(user.id, id, 'signed.pdf');
     const signedAt = new Date().toISOString();
+    const signedSha256 = sha256Hex(pdfBuffer);
 
     const { error: uploadError } = await this.supabase.admin.storage
       .from(this.supabase.documentsBucket)
@@ -127,6 +150,7 @@ export class DocumentsService {
         signer_email: dto.signerEmail.trim().toLowerCase(),
         verification_code: verificationCode,
         signed_at: signedAt,
+        signed_sha256: signedSha256,
       })
       .eq('id', id)
       .eq('user_id', user.id)
@@ -134,10 +158,29 @@ export class DocumentsService {
       .single();
 
     if (error) throw error;
+
+    await this.documentAudit.record({
+      documentId: id,
+      userId: user.id,
+      eventType: 'document.signed',
+      request,
+      metadata: {
+        signerName: dto.signerName.trim(),
+        signerEmail: dto.signerEmail.trim().toLowerCase(),
+        verificationCode,
+        signedSha256,
+      },
+    });
+
     return this.mapDocument(data as DocumentRow);
   }
 
-  async getDownloadUrl(user: AuthUser, id: string, type: 'original' | 'signed') {
+  async getDownloadUrl(
+    user: AuthUser,
+    id: string,
+    type: 'original' | 'signed',
+    request?: Request,
+  ) {
     const doc = await this.getOwnedDocument(user.id, id);
     const path = type === 'signed' ? doc.signed_pdf_path : doc.original_pdf_path;
 
@@ -148,6 +191,14 @@ export class DocumentsService {
       .createSignedUrl(path, 300);
 
     if (error || !data?.signedUrl) throw new NotFoundException('No se pudo generar URL de descarga');
+
+    await this.documentAudit.record({
+      documentId: id,
+      userId: user.id,
+      eventType: 'document.downloaded',
+      request,
+      metadata: { type },
+    });
 
     return { url: data.signedUrl, expiresIn: 300 };
   }
