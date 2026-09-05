@@ -1,5 +1,6 @@
-import { Controller, Get, Param } from '@nestjs/common';
+import { Controller, Get, Param, Req } from '@nestjs/common';
 import { ApiOperation, ApiParam, ApiTags } from '@nestjs/swagger';
+import type { Request } from 'express';
 import { Public } from '../../common/decorators/auth.decorators';
 import { VerificationService } from './verification.service';
 
@@ -12,7 +13,7 @@ export class VerificationController {
   @Get(':code')
   @ApiOperation({ summary: 'Verificar documento por código (público)' })
   @ApiParam({ name: 'code', example: 'ABCD-1234-EFGH' })
-  verify(@Param('code') code: string) {
-    return this.verificationService.verify(code);
+  verify(@Param('code') code: string, @Req() request: Request) {
+    return this.verificationService.verify(code, request);
   }
 }

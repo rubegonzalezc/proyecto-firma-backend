@@ -10,6 +10,7 @@ import { GlobalExceptionFilter } from './common/filters/global-exception.filter'
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     logger: ['error', 'warn', 'log'],
+    bodyParser: false,
   });
 
   const config = app.get(ConfigService);
@@ -19,8 +20,6 @@ async function bootstrap() {
 
   app.setGlobalPrefix(apiPrefix);
 
-  // La auditoría de firma registra la IP del firmante. Detrás de un proxy o
-  // balanceador, sin esto se guardaría la del proxy y la evidencia no serviría.
   app.set('trust proxy', 1);
 
   app.use(
@@ -60,6 +59,7 @@ async function bootstrap() {
   await app.listen(port);
   console.log(`SynchroSign API running on http://localhost:${port}/${apiPrefix}`);
   console.log(`Swagger docs: http://localhost:${port}/docs`);
+  console.log(`BetterAuth: http://localhost:${port}/api/auth`);
 }
 
 bootstrap();

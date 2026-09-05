@@ -11,10 +11,7 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Get('me')
-  @ApiOperation({
-    summary: 'Obtener perfil del usuario autenticado',
-    description: 'Requiere BetterAuth (pendiente de implementación).',
-  })
+  @ApiOperation({ summary: 'Obtener perfil del usuario autenticado' })
   getMe(@CurrentUser() user: AuthUser) {
     return this.authService.getProfile(user);
   }

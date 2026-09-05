@@ -6,7 +6,7 @@ Backend NestJS + Supabase para SynchroSign: gestión documental, firma y verific
 
 - **NestJS 11** — API REST modular
 - **Supabase** — PostgreSQL + Storage (sin Supabase Auth)
-- **BetterAuth** — Autenticación (pendiente de implementar)
+- **BetterAuth** — Autenticación con email/contraseña (`/api/auth/*`)
 - **class-validator** — Validación de DTOs
 - **Helmet + Throttler** — Seguridad HTTP y rate limiting
 - **Swagger** — Documentación en `/docs`
@@ -30,6 +30,9 @@ cp .env.example .env
 |----------|-------------|
 | `SUPABASE_URL` | URL del proyecto Supabase |
 | `SUPABASE_SERVICE_ROLE_KEY` | Clave service role (**solo servidor**) |
+| `DATABASE_URL` | Connection string PostgreSQL de Supabase |
+| `BETTER_AUTH_SECRET` | Secreto de cifrado (mín. 32 caracteres) |
+| `BETTER_AUTH_URL` | URL pública del backend (ej. `http://localhost:3000`) |
 | `CORS_ORIGINS` | Orígenes del frontend separados por coma |
 
 3. Aplica migraciones en Supabase SQL Editor, en orden:
@@ -40,10 +43,11 @@ supabase/migrations/002_storage_bucket.sql
 supabase/migrations/004_envelopes.sql
 supabase/migrations/005_tokens_audit.sql
 supabase/migrations/006_verification_v2.sql
+supabase/migrations/007_mvp_better_auth.sql
+supabase/migrations/008_better_auth_tables.sql
 ```
 
-> Las migraciones `001` y `002` ya están aplicadas en el proyecto vinculado.
-> La `003` es solo un guion de referencia para BetterAuth y no se ejecuta.
+> La `003` es solo un guion de referencia histórico y no se ejecuta.
 
 ## Desarrollo
 

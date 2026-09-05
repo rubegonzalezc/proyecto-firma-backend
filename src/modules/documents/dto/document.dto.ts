@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsEmail, IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsEmail, IsNotEmpty, IsString, MaxLength } from 'class-validator';
 
 export class SignDocumentDto {
   @ApiProperty({ example: 'Juan Pérez' })
@@ -17,12 +17,6 @@ export class SignDocumentDto {
   @IsString()
   @IsNotEmpty()
   signedPdfBase64!: string;
-
-  @ApiPropertyOptional({ example: 'ABCD-1234-EFGH' })
-  @IsOptional()
-  @IsString()
-  @MaxLength(14)
-  verificationCode?: string;
 }
 
 export class DocumentResponseDto {
@@ -43,6 +37,9 @@ export class DocumentResponseDto {
 
   @ApiPropertyOptional()
   verificationCode?: string | null;
+
+  @ApiPropertyOptional()
+  signedSha256?: string | null;
 
   @ApiProperty()
   createdAt!: string;

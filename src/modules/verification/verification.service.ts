@@ -1,30 +1,33 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import type { Request } from 'express';
 import type {
   DocumentVerificationRow,
   EnvelopeVerificationRow,
 } from '../../common/types/database.types';
 import { SupabaseService } from '../../infrastructure/supabase/supabase.service';
+import { DocumentAuditService } from '../audit/document-audit.service';
 
 const CODE_REGEX = /^[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
 
 @Injectable()
 export class VerificationService {
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly documentAudit: DocumentAuditService,
+  ) {}
 
   normalizeCode(raw: string): string {
     return raw.trim().toUpperCase();
   }
 
-  async verify(code: string) {
+  async verify(code: string, request?: Request) {
     const normalized = this.normalizeCode(code);
 
     if (!CODE_REGEX.test(normalized)) {
       throw new NotFoundException('Código de verificación inválido');
     }
 
-    // Los sobres multi-parte tienen prioridad; si no hay ninguno se consulta la
-    // vista antigua, de modo que los códigos ya emitidos siguen funcionando.
-    const envelope = await this.verifyEnvelope(normalized);
+    const envelope = await this.verifyEnvelope(normalized, request);
     if (envelope) return envelope;
 
     const { data, error } = await this.supabase.admin
@@ -47,6 +50,16 @@ export class VerificationService {
       signedPdfUrl = urlData?.signedUrl ?? null;
     }
 
+    const documentId = await this.resolveDocumentId(normalized);
+    if (documentId) {
+      await this.documentAudit.record({
+        documentId,
+        eventType: 'document.verified',
+        request,
+        metadata: { verificationCode: normalized },
+      });
+    }
+
     return {
       valid: true,
       verificationCode: row.verification_code,
@@ -61,16 +74,21 @@ export class VerificationService {
       ],
       signedAt: row.signed_at,
       signedPdfUrl,
-      // El flujo antiguo no calculaba hash: se declara explícitamente en vez
-      // de omitirlo, para que el cliente no crea que la integridad es
-      // comprobable cuando no lo es.
-      sha256: null,
-      integrityCheckAvailable: false,
+      sha256: row.signed_sha256,
+      integrityCheckAvailable: row.signed_sha256 !== null,
     };
   }
 
-  /** Verificación de un sobre multi-parte, con todos sus firmantes. */
-  private async verifyEnvelope(code: string) {
+  private async resolveDocumentId(code: string): Promise<string | null> {
+    const { data } = await this.supabase.admin
+      .from('documents')
+      .select('id')
+      .eq('verification_code', code)
+      .maybeSingle();
+    return data?.id ?? null;
+  }
+
+  private async verifyEnvelope(code: string, _request?: Request) {
     const { data, error } = await this.supabase.admin
       .from('envelope_verifications')
       .select('*')
@@ -104,8 +122,6 @@ export class VerificationService {
       signedAt: row.completed_at,
       signedPdfUrl,
       sha256: row.final_sha256,
-      // Con el hash publicado, quien tenga el PDF puede comprobar por su cuenta
-      // que no ha sido alterado, sin depender de que confíe en esta respuesta.
       integrityCheckAvailable: row.final_sha256 !== null,
     };
   }

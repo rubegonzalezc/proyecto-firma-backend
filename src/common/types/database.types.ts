@@ -18,6 +18,7 @@ export interface DocumentRow {
   signer_name: string | null;
   signer_email: string | null;
   verification_code: string | null;
+  signed_sha256: string | null;
   created_at: string;
   signed_at: string | null;
 }
@@ -29,6 +30,7 @@ export interface DocumentVerificationRow {
   signer_email: string | null;
   signed_at: string | null;
   signed_pdf_path: string | null;
+  signed_sha256: string | null;
   status: DocumentStatus;
 }
 
