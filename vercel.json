@@ -1,12 +1,13 @@
 {
   "version": 2,
   "buildCommand": "npm run build",
-  "functions": {
-    "dist/vercel.js": {
-      "maxDuration": 30
-    }
-  },
   "rewrites": [
-    { "source": "/(.*)", "destination": "/dist/vercel.js" }
-  ]
+    { "source": "/(.*)", "destination": "/api" }
+  ],
+  "functions": {
+    "api/index.ts": {
+      "maxDuration": 30,
+      "includeFiles": "{dist/**,auth/**}"
+    }
+  }
 }
