@@ -18,24 +18,48 @@ Backend NestJS + Supabase para SynchroSign: gestión documental, firma y verific
 
 ## Configuración
 
+### Variables locales
+
 1. Copia variables de entorno:
 
 ```bash
 cp .env.example .env
 ```
 
-2. Completa en `.env`:
+2. Completa `SUPABASE_SERVICE_ROLE_KEY` en `.env` (no disponible vía MCP por seguridad):
+
+   Supabase Dashboard → **Settings** → **API** → `service_role` (secret)
 
 | Variable | Descripción |
 |----------|-------------|
-| `SUPABASE_URL` | URL del proyecto Supabase |
+| `SUPABASE_URL` | `https://bvzppyxxwcmhenugfnrj.supabase.co` |
 | `SUPABASE_SERVICE_ROLE_KEY` | Clave service role (**solo servidor**) |
 | `DATABASE_URL` | Connection string PostgreSQL de Supabase |
 | `BETTER_AUTH_SECRET` | Secreto de cifrado (mín. 32 caracteres) |
 | `BETTER_AUTH_URL` | URL pública del backend (ej. `http://localhost:3000`) |
 | `CORS_ORIGINS` | Orígenes del frontend separados por coma |
 
-3. Aplica migraciones en Supabase SQL Editor, en orden:
+### Vercel (`proyecto-firma-backend.vercel.app`)
+
+Configura las mismas variables en **Vercel → Project → Settings → Environment Variables**:
+
+| Variable | Valor |
+|----------|-------|
+| `NODE_ENV` | `production` |
+| `API_PREFIX` | `api/v1` |
+| `CORS_ORIGINS` | `https://sign.synchrodev.cl,http://localhost:5173` |
+| `SUPABASE_URL` | `https://bvzppyxxwcmhenugfnrj.supabase.co` |
+| `SUPABASE_SERVICE_ROLE_KEY` | *(service_role desde Supabase Dashboard)* |
+| `APP_VERIFY_BASE_URL` | `https://sign.synchrodev.cl` |
+| `BETTER_AUTH_SECRET` | Secret de 32+ caracteres (`openssl rand -base64 32`) |
+| `BETTER_AUTH_URL` | `https://proyecto-firma-backend.vercel.app` |
+| `DATABASE_URL` | Connection string PostgreSQL de Supabase (pooler) |
+
+> Usa **Node.js 22.x** en Vercel. No instales `@thallesp/nestjs-better-auth` (provoca `ERR_REQUIRE_ESM`).
+
+### Migraciones Supabase
+
+Aplica en Supabase SQL Editor, en orden:
 
 ```
 supabase/migrations/001_initial_schema.sql
@@ -84,7 +108,7 @@ recibe por correo más un código de un solo uso.
 | POST | `/api/v1/sign/session/submit` | 5/min |
 | POST | `/api/v1/sign/session/decline` | 5/min |
 
-### Protegidos (requieren BetterAuth — pendiente)
+### Protegidos (sesión Better Auth)
 
 | Método | Ruta | Descripción |
 |--------|------|-------------|
@@ -104,24 +128,18 @@ recibe por correo más un código de un solo uso.
 | GET | `/api/v1/envelopes/:id/download` | `?type=original\|current\|final` |
 | GET | `/api/v1/envelopes/:id/audit` | Traza de auditoría |
 
-> Mientras BetterAuth no esté integrado, las rutas protegidas responden **503** con el mensaje `Autenticación pendiente: BetterAuth será integrado próximamente`.
+## Autenticación (BetterAuth)
 
-## Autenticación (BetterAuth — planificado)
+**No usamos Supabase Auth.** La autenticación usa [Better Auth](https://www.better-auth.com/) montada en `/api/auth/*`.
 
-**No usamos Supabase Auth.** La autenticación se implementará con [BetterAuth](https://www.better-auth.com/) en una fase posterior.
+> **Importante:** no uses `@thallesp/nestjs-better-auth` — provoca `ERR_REQUIRE_ESM` en Vercel porque Better Auth es ESM-only. Este proyecto carga Better Auth vía `import()` dinámico desde `auth/auth.mjs`.
 
 ### Estado actual
 
-- `BetterAuthGuard` bloquea rutas protegidas hasta la integración
-- Supabase se usa solo como **PostgreSQL + Storage** vía `service_role` en el servidor
-- Decoradores `@Public()` y `@CurrentUser()` listos para cuando exista sesión
-
-### Próximos pasos de auth
-
-1. Instalar y configurar BetterAuth en el backend
-2. Migrar esquema: `profiles` y `documents` dejarán de depender de `auth.users`
-3. Reemplazar `BetterAuthGuard` por validación de sesión real
-4. Exponer endpoints de auth (`/api/auth/*`) al frontend
+- Rutas de auth: `POST/GET /api/auth/*` (Better Auth)
+- `BetterAuthGuard` valida sesión con cookies
+- Supabase se usa como **PostgreSQL + Storage** vía `service_role` en el servidor
+- Decoradores `@Public()` y `@CurrentUser()` para rutas NestJS
 
 ## Seguridad
 
@@ -191,7 +209,7 @@ npm run build
 npm run start:prod
 ```
 
-Configura `CORS_ORIGINS` con tu dominio de Vercel y despliega en Railway, Render, Fly.io, etc.
+Configura `CORS_ORIGINS` con `https://sign.synchrodev.cl` y despliega en Vercel, Railway, Render, Fly.io, etc.
 
 ## Roadmap
 
@@ -199,8 +217,6 @@ Configura `CORS_ORIGINS` con tu dominio de Vercel y despliega en Railway, Render
       del servidor; sin proveedor, el portal no es usable en producción)
 - [ ] `@pdf-lib/fontkit` para nombres fuera de WinAnsi (hoy se sustituyen)
 - [ ] Caducidad automática de sobres (`expires_at` se guarda pero no hay cron)
-- [ ] Integrar BetterAuth
-- [ ] Migración de esquema para usuarios independientes de Supabase Auth
 - [ ] Integrar frontend con esta API
 - [ ] Tests e2e con Supertest
 - [ ] CI/CD con GitHub Actions
