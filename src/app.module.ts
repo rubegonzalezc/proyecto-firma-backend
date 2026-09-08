@@ -23,7 +23,7 @@ import { HealthModule } from './modules/health/health.module';
       isGlobal: true,
       load: [appConfig, supabaseConfig, betterAuthConfig],
       validationSchema: envValidationSchema,
-      validationOptions: { abortEarly: true },
+      validationOptions: { abortEarly: true, convert: true },
     }),
     ThrottlerModule.forRoot([
       {
