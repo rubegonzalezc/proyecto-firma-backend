@@ -1,3 +1,4 @@
+import type { IncomingMessage, ServerResponse } from 'http';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
 import { importEsm } from './esm-import';
@@ -32,9 +33,19 @@ export async function getAuth() {
 }
 
 export async function mountBetterAuth(expressApp: {
-  all: (path: string, handler: unknown) => void;
+  use: (handler: unknown) => void;
 }): Promise<void> {
   const authModule = await importEsm<AuthModule>(authModuleUrl());
   const auth = await authModule.getAuth();
-  expressApp.all('/api/auth/*', toNodeHandler(auth));
+  const handler = toNodeHandler(auth);
+
+  // Express 5 no admite `/api/auth/*`; interceptamos por prefijo.
+  expressApp.use((req: IncomingMessage & { path?: string }, res: ServerResponse, next: () => void) => {
+    if (!req.path?.startsWith('/api/auth')) {
+      next();
+      return;
+    }
+
+    void handler(req, res);
+  });
 }
