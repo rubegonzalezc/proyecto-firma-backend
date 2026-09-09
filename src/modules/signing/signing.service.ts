@@ -38,7 +38,7 @@ export class SigningService {
   private instructionsFor(
     fields: SignatureFieldRow[],
     signer: EnvelopeSignerRow,
-    signatureBase64: string,
+    signatureBase64: string | undefined,
     displayName: string,
   ): StampInstruction[] {
     const instructions: StampInstruction[] = [];
@@ -55,7 +55,14 @@ export class SigningService {
       switch (field.type) {
         case 'signature':
         case 'initials':
-          instructions.push({ rect, value: { kind: 'signature', pngBase64: signatureBase64 } });
+          if (signatureBase64) {
+            instructions.push({ rect, value: { kind: 'signature', pngBase64: signatureBase64 } });
+          } else {
+            instructions.push({
+              rect,
+              value: { kind: 'text', text: displayName, align: 'center', bold: true },
+            });
+          }
           break;
         case 'name':
           instructions.push({ rect, value: { kind: 'text', text: displayName } });
@@ -87,8 +94,8 @@ export class SigningService {
   async submitSignature(params: {
     envelopeId: string;
     signerId: string;
-    signatureBase64: string;
-    fullName?: string;
+    signatureBase64?: string;
+    fullName: string;
     request?: Request;
   }) {
     const { envelopeId, signerId, signatureBase64, request } = params;
@@ -109,7 +116,7 @@ export class SigningService {
     const currentBytes = await this.envelopes.download(envelope.current_pdf_path);
     const shaBefore = sha256Hex(currentBytes);
 
-    const displayName = params.fullName?.trim() || signer.full_name;
+    const displayName = params.fullName.trim() || signer.full_name;
     const stamped = await this.stamper.stampFields(
       currentBytes,
       this.instructionsFor(own, signer, signatureBase64, displayName),

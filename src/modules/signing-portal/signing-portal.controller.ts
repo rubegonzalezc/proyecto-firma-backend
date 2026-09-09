@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  ForbiddenException,
   Get,
   NotFoundException,
   Param,
@@ -12,7 +13,9 @@ import {
 import { Throttle } from '@nestjs/throttler';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
-import { Public } from '../../common/decorators/auth.decorators';
+import { CurrentUser, Public } from '../../common/decorators/auth.decorators';
+import type { AuthUser } from '../../common/types/database.types';
+import { AuthService } from '../auth/auth.service';
 import { AuditService } from '../audit/audit.service';
 import { EnvelopesService } from '../envelopes/envelopes.service';
 import { activeSigners } from '../envelopes/envelope-state';
@@ -49,6 +52,7 @@ export class SigningPortalController {
     private readonly envelopes: EnvelopesService,
     private readonly signing: SigningService,
     private readonly audit: AuditService,
+    private readonly authService: AuthService,
   ) {}
 
   /** Respuesta neutra: no revela si el sobre existe, solo si el enlace sirve. */
@@ -223,12 +227,82 @@ export class SigningPortalController {
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post('session/submit')
   @ApiOperation({ summary: 'Firmar: el servidor estampa los campos del firmante' })
-  submit(@Body() dto: SubmitSignatureDto, @Req() request: RequestWithSigner) {
+  async submit(@Body() dto: SubmitSignatureDto, @Req() request: RequestWithSigner) {
+    const { signers } = await this.envelopes.getBundle(request.signer.envelopeId);
+    const me = signers.find((s) => s.id === request.signer.signerId);
+    if (!me) this.notFound();
+
     return this.signing.submitSignature({
       envelopeId: request.signer.envelopeId,
       signerId: request.signer.signerId,
       signatureBase64: dto.signatureImageBase64,
-      fullName: dto.fullName,
+      fullName: me.full_name,
+      request,
+    });
+  }
+
+  @Get(':token/account')
+  @ApiOperation({ summary: 'Contexto del enlace para un usuario autenticado' })
+  async accountContext(@Param('token') token: string, @CurrentUser() user: AuthUser) {
+    const resolved = await this.tokens.resolve(token);
+    if (!resolved) this.notFound();
+
+    if (user.email.trim().toLowerCase() !== resolved.signer.email.trim().toLowerCase()) {
+      throw new ForbiddenException(
+        'Debes iniciar sesión con la cuenta invitada a firmar este documento.',
+      );
+    }
+
+    const { envelope, signers } = await this.envelopes.getBundle(resolved.signer.envelope_id);
+    const profile = await this.authService.getProfile(user);
+    const displayName = profile.full_name?.trim() || user.email;
+
+    return {
+      documentName: envelope.name,
+      message: envelope.message,
+      signerName: displayName,
+      signerEmail: user.email,
+      yourTurn: activeSigners(signers, envelope.mode).some((s) => s.id === resolved.signer.id),
+      envelopeStatus: envelope.status,
+    };
+  }
+
+  @Get(':token/account/document')
+  @ApiOperation({ summary: 'PDF actual del sobre para el firmante autenticado' })
+  async accountDocument(@Param('token') token: string, @CurrentUser() user: AuthUser) {
+    const resolved = await this.tokens.resolve(token);
+    if (!resolved) this.notFound();
+
+    if (user.email.trim().toLowerCase() !== resolved.signer.email.trim().toLowerCase()) {
+      throw new ForbiddenException(
+        'Debes iniciar sesión con la cuenta invitada a firmar este documento.',
+      );
+    }
+
+    const { envelope } = await this.envelopes.getBundle(resolved.signer.envelope_id);
+    const url = await this.envelopes.signedUrl(envelope.current_pdf_path, 300);
+    return { url, expiresIn: 300 };
+  }
+
+  @Post(':token/account/submit')
+  @ApiOperation({ summary: 'Firmar con cuenta: estampa el nombre del perfil autenticado' })
+  async accountSubmit(@Param('token') token: string, @CurrentUser() user: AuthUser, @Req() request: Request) {
+    const resolved = await this.tokens.resolve(token);
+    if (!resolved) this.notFound();
+
+    if (user.email.trim().toLowerCase() !== resolved.signer.email.trim().toLowerCase()) {
+      throw new ForbiddenException(
+        'Debes iniciar sesión con la cuenta invitada a firmar este documento.',
+      );
+    }
+
+    const profile = await this.authService.getProfile(user);
+    const displayName = profile.full_name?.trim() || user.email;
+
+    return this.signing.submitSignature({
+      envelopeId: resolved.signer.envelope_id,
+      signerId: resolved.signer.id,
+      fullName: displayName,
       request,
     });
   }

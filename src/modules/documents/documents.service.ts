@@ -4,6 +4,7 @@ import {
   NotFoundException,
   ForbiddenException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import type { Request } from 'express';
 import { randomBytes, randomUUID } from 'crypto';
 import type { AuthUser } from '../../common/types/database.types';
@@ -11,7 +12,11 @@ import type { DocumentRow } from '../../common/types/database.types';
 import { sha256Hex } from '../../common/utils/hash';
 import { SupabaseService } from '../../infrastructure/supabase/supabase.service';
 import { DocumentAuditService } from '../audit/document-audit.service';
+import { AuthService } from '../auth/auth.service';
+import { EnvelopesService } from '../envelopes/envelopes.service';
+import { DocumentStampService } from '../signing/pdf/document-stamp.service';
 import type { SignDocumentDto } from './dto/document.dto';
+import type { SendForSignatureDto } from './dto/send-for-signature.dto';
 
 const MAX_PDF_BYTES = 20 * 1024 * 1024; // 20 MB
 
@@ -20,6 +25,10 @@ export class DocumentsService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly documentAudit: DocumentAuditService,
+    private readonly authService: AuthService,
+    private readonly documentStamp: DocumentStampService,
+    private readonly envelopes: EnvelopesService,
+    private readonly config: ConfigService,
   ) {}
 
   private storagePath(userId: string, documentId: string, filename: string): string {
@@ -109,6 +118,110 @@ export class DocumentsService {
     });
 
     return this.mapDocument(data as DocumentRow);
+  }
+
+  async stampSign(user: AuthUser, id: string, request?: Request) {
+    const doc = await this.getOwnedDocument(user.id, id);
+
+    if (doc.status === 'signed') {
+      throw new BadRequestException('El documento ya está firmado');
+    }
+
+    const profile = await this.authService.getProfile(user);
+    const displayName = profile.full_name?.trim() || user.email;
+    const signerEmail = user.email.trim().toLowerCase();
+
+    const { data: originalFile, error: downloadError } = await this.supabase.admin.storage
+      .from(this.supabase.documentsBucket)
+      .download(doc.original_pdf_path);
+
+    if (downloadError || !originalFile) {
+      throw new NotFoundException('No se pudo leer el documento original');
+    }
+
+    const originalBytes = Buffer.from(await originalFile.arrayBuffer());
+    const verificationCode = doc.verification_code ?? this.generateVerificationCode();
+    const signedAt = new Date();
+    const verifyBaseUrl = (this.config.get<string>('app.verifyBaseUrl') ?? '').replace(/\/$/, '');
+    const verifyUrl = `${verifyBaseUrl}/verify/${verificationCode}`;
+
+    const stampedBytes = await this.documentStamp.stamp(originalBytes, {
+      displayName,
+      email: signerEmail,
+      verificationCode,
+      signedAt,
+      verifyUrl,
+    });
+
+    const signedPath = this.storagePath(user.id, id, 'signed.pdf');
+    const signedSha256 = sha256Hex(stampedBytes);
+
+    const { error: uploadError } = await this.supabase.admin.storage
+      .from(this.supabase.documentsBucket)
+      .upload(signedPath, stampedBytes, {
+        contentType: 'application/pdf',
+        upsert: true,
+      });
+
+    if (uploadError) throw uploadError;
+
+    const { data, error } = await this.supabase.admin
+      .from('documents')
+      .update({
+        status: 'signed',
+        signed_pdf_path: signedPath,
+        signer_name: displayName,
+        signer_email: signerEmail,
+        verification_code: verificationCode,
+        signed_at: signedAt.toISOString(),
+        signed_sha256: signedSha256,
+      })
+      .eq('id', id)
+      .eq('user_id', user.id)
+      .select('*')
+      .single();
+
+    if (error) throw error;
+
+    await this.documentAudit.record({
+      documentId: id,
+      userId: user.id,
+      eventType: 'document.signed',
+      request,
+      metadata: {
+        signerName: displayName,
+        signerEmail,
+        verificationCode,
+        signedSha256,
+        method: 'stamp',
+      },
+    });
+
+    return this.mapDocument(data as DocumentRow);
+  }
+
+  async sendForSignature(
+    user: AuthUser,
+    id: string,
+    dto: SendForSignatureDto,
+    request?: Request,
+  ) {
+    const doc = await this.getOwnedDocument(user.id, id);
+    if (doc.status === 'signed') {
+      throw new BadRequestException('El documento ya está firmado');
+    }
+
+    const email = dto.signerEmail.trim().toLowerCase();
+    if (email === user.email.trim().toLowerCase()) {
+      throw new BadRequestException('Usa "Firmar documento" para firmar tus propios archivos.');
+    }
+
+    return this.envelopes.createAndSendForSignature(
+      user,
+      id,
+      { signerEmail: email, message: dto.message },
+      request,
+    );
   }
 
   async sign(user: AuthUser, id: string, dto: SignDocumentDto, request?: Request) {

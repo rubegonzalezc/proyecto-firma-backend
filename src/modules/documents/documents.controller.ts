@@ -26,6 +26,7 @@ import { CurrentUser } from '../../common/decorators/auth.decorators';
 import type { AuthUser } from '../../common/types/database.types';
 import { DocumentsService } from './documents.service';
 import { SignDocumentDto } from './dto/document.dto';
+import { SendForSignatureDto } from './dto/send-for-signature.dto';
 
 @ApiTags('documents')
 @ApiBearerAuth()
@@ -68,8 +69,29 @@ export class DocumentsController {
     return this.documentsService.create(user, file, request);
   }
 
+  @Post(':id/stamp-sign')
+  @ApiOperation({ summary: 'Firmar documento con estampado del nombre del perfil autenticado' })
+  stampSign(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Req() request: Request,
+  ) {
+    return this.documentsService.stampSign(user, id, request);
+  }
+
+  @Post(':id/send-for-signature')
+  @ApiOperation({ summary: 'Enviar documento a un firmante con enlace de firma' })
+  sendForSignature(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SendForSignatureDto,
+    @Req() request: Request,
+  ) {
+    return this.documentsService.sendForSignature(user, id, dto, request);
+  }
+
   @Post(':id/sign')
-  @ApiOperation({ summary: 'Registrar firma y PDF firmado' })
+  @ApiOperation({ summary: 'Registrar firma y PDF firmado (legacy)' })
   sign(
     @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,

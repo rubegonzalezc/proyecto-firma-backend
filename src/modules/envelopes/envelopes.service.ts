@@ -19,7 +19,7 @@ import { sha256Hex } from '../../common/utils/hash';
 import { SupabaseService } from '../../infrastructure/supabase/supabase.service';
 import { AuditService } from '../audit/audit.service';
 import { SignerTokenService } from '../signer-access/signer-token.service';
-import { CreateEnvelopeDto, UpdateEnvelopeDto } from './dto/envelope.dto';
+import { CreateEnvelopeDto, FieldTypeDto, SigningModeDto, UpdateEnvelopeDto } from './dto/envelope.dto';
 import { initialSignerStatus, validateBeforeSend } from './envelope-state';
 
 const DOWNLOAD_URL_TTL_SECONDS = 300;
@@ -453,6 +453,70 @@ export class EnvelopesService {
       throw new ForbiddenException('No tienes acceso a este documento');
     }
     return data as DocumentRow;
+  }
+
+  /** Crea un sobre de un firmante con campos por defecto y lo envía de inmediato. */
+  async createAndSendForSignature(
+    user: AuthUser,
+    documentId: string,
+    params: { signerEmail: string; message?: string },
+    request?: Request,
+  ) {
+    const signerTempId = 'signer-1';
+    const email = params.signerEmail.trim().toLowerCase();
+
+    const document = await this.getOwnedDocument(user.id, documentId);
+    const originalBytes = await this.download(document.original_pdf_path);
+    const pdf = await PDFDocument.load(originalBytes);
+    const pageCount = pdf.getPageCount();
+    const lastPage = pdf.getPage(pageCount - 1);
+    const { width, height } = lastPage.getSize();
+
+    const bundle = await this.create(
+      user,
+      {
+        documentId,
+        mode: SigningModeDto.parallel,
+        message: params.message,
+        signers: [
+          {
+            tempId: signerTempId,
+            fullName: email.split('@')[0],
+            email,
+            roleLabel: 'Firmante',
+          },
+        ],
+        fields: [
+          {
+            signerTempId,
+            page: pageCount,
+            x: 0.08,
+            y: 0.82,
+            w: 0.55,
+            h: 0.07,
+            type: FieldTypeDto.signature,
+            pageWidthPt: width,
+            pageHeightPt: height,
+            detectionSource: 'fallback',
+          },
+          {
+            signerTempId,
+            page: pageCount,
+            x: 0.66,
+            y: 0.82,
+            w: 0.24,
+            h: 0.05,
+            type: FieldTypeDto.date,
+            pageWidthPt: width,
+            pageHeightPt: height,
+            detectionSource: 'fallback',
+          },
+        ],
+      },
+      request,
+    );
+
+    return this.send(user, bundle.envelope.id, request);
   }
 
   mapEnvelope(row: EnvelopeRow) {
