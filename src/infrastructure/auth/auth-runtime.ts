@@ -1,17 +1,37 @@
-let authPromise: Promise<Awaited<ReturnType<typeof import('../../../auth/auth.mjs').getAuth>>> | null =
-  null;
+import { join } from 'path';
+import { pathToFileURL } from 'url';
+import { importEsm } from './esm-import';
 
-type AuthModule = typeof import('../../../auth/auth.mjs');
+type AuthModule = {
+  getAuth: () => Promise<{
+    api: {
+      getSession: (input: { headers: HeadersInit }) => Promise<{
+        user?: { id: string; email: string };
+      } | null>;
+    };
+    handler: (request: Request) => Promise<Response>;
+  }>;
+};
+
+type BetterAuthNodeModule = {
+  toNodeHandler: (
+    auth: { handler: (request: Request) => Promise<Response> },
+  ) => (req: unknown, res: unknown) => void;
+};
+
+let authPromise: ReturnType<AuthModule['getAuth']> | null = null;
+
+function authModuleUrl(): string {
+  return pathToFileURL(join(__dirname, '../../../auth/auth.mjs')).href;
+}
 
 /**
  * Carga Better Auth como ESM desde NestJS (CommonJS) sin usar require().
- * Evita ERR_REQUIRE_ESM con @thallesp/nestjs-better-auth.
  */
 export async function getAuth() {
   if (!authPromise) {
-    authPromise = import('../../../auth/auth.mjs').then(
-      (module: AuthModule) => module.getAuth(),
-    );
+    const module = await importEsm<AuthModule>(authModuleUrl());
+    authPromise = module.getAuth();
   }
   return authPromise;
 }
@@ -19,11 +39,11 @@ export async function getAuth() {
 export async function mountBetterAuth(expressApp: {
   all: (path: string, handler: unknown) => void;
 }): Promise<void> {
-  const [{ getAuth: loadAuth }, { toNodeHandler }] = await Promise.all([
-    import('../../../auth/auth.mjs') as Promise<AuthModule>,
-    import('better-auth/node'),
+  const [authModule, betterAuthNode] = await Promise.all([
+    importEsm<AuthModule>(authModuleUrl()),
+    importEsm<BetterAuthNodeModule>('better-auth/node'),
   ]);
 
-  const auth = await loadAuth();
-  expressApp.all('/api/auth/*', toNodeHandler(auth));
+  const auth = await authModule.getAuth();
+  expressApp.all('/api/auth/*', betterAuthNode.toNodeHandler(auth));
 }
