@@ -30,11 +30,23 @@ export async function getAuth() {
     .map((origin) => origin.trim())
     .filter(Boolean);
 
+  const isProduction = process.env.NODE_ENV === 'production';
+
   authInstance = betterAuth({
     database: getPool(),
     secret,
     baseURL,
     trustedOrigins: [baseURL, ...trustedOrigins],
+    advanced: isProduction
+      ? {
+          useSecureCookies: true,
+          defaultCookieAttributes: {
+            sameSite: 'none',
+            secure: true,
+            httpOnly: true,
+          },
+        }
+      : undefined,
     emailAndPassword: {
       enabled: true,
       minPasswordLength: 6,
