@@ -51,7 +51,7 @@ export class DocumentsService {
       signers: Array<{ full_name: string; email: string; status: string }>;
     },
   ) {
-    if (row.status === 'signed' || !envelope) {
+    if ((row.status === 'signed' && row.signed_pdf_path) || !envelope) {
       return {
         id: row.id,
         name: row.name,
@@ -420,7 +420,11 @@ export class DocumentsService {
     request?: Request,
   ) {
     const doc = await this.getOwnedDocument(user.id, id);
-    const path = type === 'signed' ? doc.signed_pdf_path : doc.original_pdf_path;
+    let path = type === 'signed' ? doc.signed_pdf_path : doc.original_pdf_path;
+
+    if (type === 'signed' && !path) {
+      path = await this.resolveSignedPathFromEnvelope(user.id, id, doc);
+    }
 
     if (!path) throw new NotFoundException('Archivo no disponible');
 
@@ -457,6 +461,68 @@ export class DocumentsService {
 
     if (error) throw error;
     return { deleted: true };
+  }
+
+  /** Recupera el PDF firmado desde un sobre completado y sincroniza el documento si faltaba. */
+  private async resolveSignedPathFromEnvelope(
+    userId: string,
+    documentId: string,
+    doc: DocumentRow,
+  ): Promise<string | null> {
+    const { data: envelope } = await this.supabase.admin
+      .from('envelopes')
+      .select(
+        'final_pdf_path, final_sha256, verification_code, completed_at, envelope_signers(full_name, email, status)',
+      )
+      .eq('document_id', documentId)
+      .eq('user_id', userId)
+      .eq('status', 'completed')
+      .order('completed_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!envelope?.final_pdf_path) return null;
+
+    if (doc.signed_pdf_path) return doc.signed_pdf_path;
+
+    const { data: finalFile, error: downloadError } = await this.supabase.admin.storage
+      .from(this.supabase.documentsBucket)
+      .download(envelope.final_pdf_path as string);
+
+    if (downloadError || !finalFile) return envelope.final_pdf_path as string;
+
+    const finalBytes = Buffer.from(await finalFile.arrayBuffer());
+    const signedPath = this.storagePath(userId, documentId, 'signed.pdf');
+
+    await this.supabase.admin.storage
+      .from(this.supabase.documentsBucket)
+      .upload(signedPath, finalBytes, { contentType: 'application/pdf', upsert: true });
+
+    const signers = (envelope.envelope_signers as Array<{
+      full_name: string;
+      email: string;
+      status: string;
+    }>) ?? [];
+    const signedSigners = signers.filter((s) => s.status === 'signed');
+    const signerName = signedSigners
+      .map((s) => s.full_name?.trim() || s.email)
+      .join(', ');
+
+    await this.supabase.admin
+      .from('documents')
+      .update({
+        status: 'signed',
+        signed_pdf_path: signedPath,
+        signed_sha256: envelope.final_sha256,
+        verification_code: envelope.verification_code,
+        signer_name: signerName || null,
+        signer_email: signedSigners[0]?.email ?? null,
+        signed_at: envelope.completed_at,
+      })
+      .eq('id', documentId)
+      .eq('user_id', userId);
+
+    return signedPath;
   }
 
   private async getOwnedDocument(userId: string, id: string): Promise<DocumentRow> {

@@ -5,6 +5,7 @@ import type { EnvelopeSignerRow, SignatureFieldRow } from '../../common/types/da
 import { sha256Hex } from '../../common/utils/hash';
 import { SupabaseService } from '../../infrastructure/supabase/supabase.service';
 import { AuditService } from '../audit/audit.service';
+import { DocumentAuditService } from '../audit/document-audit.service';
 import { EnvelopesService } from '../envelopes/envelopes.service';
 import {
   canSign,
@@ -32,8 +33,13 @@ export class SigningService {
     private readonly stamper: PdfStampService,
     private readonly certificates: CertificateService,
     private readonly audit: AuditService,
+    private readonly documentAudit: DocumentAuditService,
     private readonly config: ConfigService,
   ) {}
+
+  private documentStoragePath(userId: string, documentId: string, filename: string): string {
+    return `${userId}/${documentId}/${filename}`;
+  }
 
   private instructionsFor(
     fields: SignatureFieldRow[],
@@ -207,6 +213,7 @@ export class SigningService {
 
     await this.finalize({
       envelopeId,
+      documentId: envelope.document_id,
       userId: envelope.user_id,
       name: envelope.name,
       originalSha256: envelope.original_sha256,
@@ -223,6 +230,7 @@ export class SigningService {
   /** Cierra el sobre: hoja de certificación, código de verificación y hash final. */
   private async finalize(params: {
     envelopeId: string;
+    documentId: string;
     userId: string;
     name: string;
     originalSha256: string;
@@ -253,6 +261,8 @@ export class SigningService {
     const finalSha256 = sha256Hex(finalBytes);
     await this.envelopes.upload(finalPath, finalBytes);
 
+    const completedAt = new Date().toISOString();
+
     await this.supabase.admin
       .from('envelopes')
       .update({
@@ -261,9 +271,20 @@ export class SigningService {
         current_version: params.version,
         final_pdf_path: finalPath,
         final_sha256: finalSha256,
-        completed_at: new Date().toISOString(),
+        completed_at: completedAt,
       })
       .eq('id', params.envelopeId);
+
+    await this.syncDocumentRecord({
+      documentId: params.documentId,
+      userId: params.userId,
+      finalBytes,
+      finalSha256,
+      verificationCode,
+      signers: params.signers,
+      completedAt,
+      request: params.request,
+    });
 
     await this.audit.record({
       envelopeId: params.envelopeId,
@@ -272,6 +293,64 @@ export class SigningService {
       request: params.request,
       metadata: { verificationCode, signers: params.signers.length },
       sha256After: finalSha256,
+    });
+  }
+
+  /** Copia el PDF final del sobre al registro del documento fuente. */
+  private async syncDocumentRecord(params: {
+    documentId: string;
+    userId: string;
+    finalBytes: Buffer;
+    finalSha256: string;
+    verificationCode: string;
+    signers: EnvelopeSignerRow[];
+    completedAt: string;
+    request?: Request;
+  }): Promise<void> {
+    const signedPath = this.documentStoragePath(params.userId, params.documentId, 'signed.pdf');
+
+    const { error: uploadError } = await this.supabase.admin.storage
+      .from(this.supabase.documentsBucket)
+      .upload(signedPath, params.finalBytes, {
+        contentType: 'application/pdf',
+        upsert: true,
+      });
+
+    if (uploadError) throw uploadError;
+
+    const signedSigners = params.signers.filter((s) => s.status === 'signed');
+    const signerName = signedSigners
+      .map((s) => s.full_name?.trim() || s.email)
+      .join(', ');
+
+    const { error } = await this.supabase.admin
+      .from('documents')
+      .update({
+        status: 'signed',
+        signed_pdf_path: signedPath,
+        signed_sha256: params.finalSha256,
+        verification_code: params.verificationCode,
+        signer_name: signerName || null,
+        signer_email: signedSigners[0]?.email ?? null,
+        signed_at: params.completedAt,
+      })
+      .eq('id', params.documentId)
+      .eq('user_id', params.userId);
+
+    if (error) throw error;
+
+    await this.documentAudit.record({
+      documentId: params.documentId,
+      userId: params.userId,
+      eventType: 'document.signed',
+      request: params.request,
+      metadata: {
+        signerName,
+        signerEmail: signedSigners[0]?.email ?? null,
+        verificationCode: params.verificationCode,
+        signedSha256: params.finalSha256,
+        method: 'envelope',
+      },
     });
   }
 
