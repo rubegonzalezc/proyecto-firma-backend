@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
 import { createAuthCorsMiddleware } from './auth-cors';
-import { BETTER_AUTH_ROUTE_PREFIX } from './auth.constants';
+import { isBetterAuthRoute } from './auth-route';
 import type { AuthModule, BetterAuthInstance } from './auth.types';
 import { importEsm } from './esm-import';
 import { toNodeHandler } from './node-handler';
@@ -43,7 +43,7 @@ export async function mountBetterAuth(
 
   // Express 5 no admite wildcards tipo `/api/auth/*`.
   expressApp.use((req: IncomingMessage & { path?: string }, res: ServerResponse, next: () => void) => {
-    if (!req.path?.startsWith(BETTER_AUTH_ROUTE_PREFIX)) {
+    if (!isBetterAuthRoute(req)) {
       next();
       return;
     }

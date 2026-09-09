@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'http';
-import { BETTER_AUTH_ROUTE_PREFIX } from './auth.constants';
+import { isBetterAuthRoute } from './auth-route';
 
 type NodeRequest = IncomingMessage & { path?: string; method?: string };
 
@@ -17,7 +17,7 @@ export function createAuthCorsMiddleware(allowedOrigins: string[]) {
   const origins = new Set(allowedOrigins);
 
   return (req: NodeRequest, res: ServerResponse, next: () => void) => {
-    if (!req.path?.startsWith(BETTER_AUTH_ROUTE_PREFIX)) {
+    if (!isBetterAuthRoute(req)) {
       next();
       return;
     }
