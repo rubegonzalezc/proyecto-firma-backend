@@ -67,6 +67,10 @@ export class DocumentsService {
     return (data as DocumentRow[]).map((row) => this.mapDocument(row));
   }
 
+  findInbox(user: AuthUser) {
+    return this.envelopes.findInboxForSigner(user);
+  }
+
   async findOne(user: AuthUser, id: string) {
     const doc = await this.getOwnedDocument(user.id, id);
     return this.mapDocument(doc);

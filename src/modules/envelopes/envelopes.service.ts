@@ -20,7 +20,7 @@ import { SupabaseService } from '../../infrastructure/supabase/supabase.service'
 import { AuditService } from '../audit/audit.service';
 import { SignerTokenService } from '../signer-access/signer-token.service';
 import { CreateEnvelopeDto, FieldTypeDto, SigningModeDto, UpdateEnvelopeDto } from './dto/envelope.dto';
-import { initialSignerStatus, validateBeforeSend } from './envelope-state';
+import { activeSigners, initialSignerStatus, validateBeforeSend } from './envelope-state';
 
 const DOWNLOAD_URL_TTL_SECONDS = 300;
 const DEFAULT_EXPIRY_DAYS = 30;
@@ -335,6 +335,102 @@ export class EnvelopesService {
   private portalUrl(token: string): string {
     const base = this.config.get<string>('app.portalBaseUrl') ?? '';
     return `${base.replace(/\/$/, '')}/sign/${token}`;
+  }
+
+  /** Documentos enviados al usuario autenticado para que los firme. */
+  async findInboxForSigner(user: AuthUser) {
+    const email = user.email.trim().toLowerCase();
+
+    const { data, error } = await this.supabase.admin
+      .from('envelope_signers')
+      .select('*, envelopes(*)')
+      .eq('email', email)
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+
+    const rows = (data ?? []).filter((row) => {
+      const envelope = row.envelopes as EnvelopeRow | null;
+      return envelope && !['draft', 'voided'].includes(envelope.status);
+    });
+
+    const ownerIds = [
+      ...new Set(
+        rows
+          .map((row) => (row.envelopes as EnvelopeRow | null)?.user_id)
+          .filter((id): id is string => Boolean(id)),
+      ),
+    ];
+
+    const ownersById = new Map<string, { full_name: string | null; email: string | null }>();
+    if (ownerIds.length > 0) {
+      const { data: owners } = await this.supabase.admin
+        .from('profiles')
+        .select('id, full_name, email')
+        .in('id', ownerIds);
+
+      for (const owner of owners ?? []) {
+        ownersById.set(owner.id as string, {
+          full_name: owner.full_name as string | null,
+          email: owner.email as string | null,
+        });
+      }
+    }
+
+    const inbox = [];
+    for (const row of rows) {
+      const signer = row as EnvelopeSignerRow;
+      const envelope = row.envelopes as EnvelopeRow;
+      const owner = ownersById.get(envelope.user_id);
+      const yourTurn = activeSigners(
+        [{ id: signer.id, order_index: signer.order_index, status: signer.status }],
+        envelope.mode,
+      ).some((s) => s.id === signer.id);
+
+      const expiresAt =
+        envelope.expires_at ??
+        new Date(Date.now() + DEFAULT_EXPIRY_DAYS * 86_400_000).toISOString();
+
+      let signUrl: string | null = null;
+      const canSignNow =
+        yourTurn &&
+        ['sent', 'in_progress'].includes(envelope.status) &&
+        !['signed', 'declined', 'expired'].includes(signer.status);
+
+      if (canSignNow) {
+        const token = await this.tokens.reissue(signer.id, expiresAt);
+        signUrl = this.portalUrl(token);
+      }
+
+      const listStatus =
+        signer.status === 'signed'
+          ? 'signed'
+          : signer.status === 'declined'
+            ? 'declined'
+            : 'to_sign';
+
+      inbox.push({
+        id: signer.id,
+        envelopeId: envelope.id,
+        documentId: envelope.document_id,
+        name: envelope.name,
+        status: listStatus,
+        role: 'signer' as const,
+        yourTurn,
+        signUrl,
+        ownerName: owner?.full_name?.trim() || owner?.email || null,
+        ownerEmail: owner?.email ?? null,
+        sentAt: envelope.sent_at,
+        signedAt: signer.signed_at,
+        createdAt: signer.created_at,
+      });
+    }
+
+    return inbox.sort((a, b) => {
+      const aTime = new Date(a.sentAt ?? a.createdAt).getTime();
+      const bTime = new Date(b.sentAt ?? b.createdAt).getTime();
+      return bTime - aTime;
+    });
   }
 
   async void(user: AuthUser, id: string, reason?: string, request?: Request) {

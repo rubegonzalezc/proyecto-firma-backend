@@ -40,6 +40,12 @@ export class DocumentsController {
     return this.documentsService.findAll(user);
   }
 
+  @Get('inbox')
+  @ApiOperation({ summary: 'Listar documentos enviados al usuario para firmar' })
+  findInbox(@CurrentUser() user: AuthUser) {
+    return this.documentsService.findInbox(user);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Obtener documento por ID' })
   findOne(@CurrentUser() user: AuthUser, @Param('id', ParseUUIDPipe) id: string) {
