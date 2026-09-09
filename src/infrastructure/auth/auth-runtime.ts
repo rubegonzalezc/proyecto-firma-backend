@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
+import { createAuthCorsMiddleware } from './auth-cors';
 import { BETTER_AUTH_ROUTE_PREFIX } from './auth.constants';
 import type { AuthModule, BetterAuthInstance } from './auth.types';
 import { importEsm } from './esm-import';
@@ -25,9 +26,18 @@ export async function getAuth(): Promise<BetterAuthInstance> {
   return authPromise;
 }
 
-export async function mountBetterAuth(expressApp: {
-  use: (handler: unknown) => void;
-}): Promise<void> {
+type MountBetterAuthOptions = {
+  corsOrigins: string[];
+};
+
+export async function mountBetterAuth(
+  expressApp: {
+    use: (handler: unknown) => void;
+  },
+  options: MountBetterAuthOptions,
+): Promise<void> {
+  expressApp.use(createAuthCorsMiddleware(options.corsOrigins));
+
   const auth = await getAuth();
   const handler = toNodeHandler(auth);
 

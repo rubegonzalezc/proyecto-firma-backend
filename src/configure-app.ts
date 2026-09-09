@@ -4,6 +4,7 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
 import express from 'express';
 import { GlobalExceptionFilter } from './common/filters/global-exception.filter';
+import { AUTH_CORS_ALLOWED_HEADERS } from './infrastructure/auth/auth-cors';
 import { mountBetterAuth } from './infrastructure/auth/auth-runtime';
 
 export async function configureApp(app: INestApplication): Promise<void> {
@@ -16,7 +17,7 @@ export async function configureApp(app: INestApplication): Promise<void> {
     expressApp.set('trust proxy', 1);
   }
 
-  await mountBetterAuth(expressApp);
+  await mountBetterAuth(expressApp, { corsOrigins });
 
   expressApp.use(express.json({ limit: '25mb' }));
   expressApp.use(express.urlencoded({ extended: true, limit: '25mb' }));
@@ -33,7 +34,7 @@ export async function configureApp(app: INestApplication): Promise<void> {
     origin: corsOrigins,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    allowedHeaders: AUTH_CORS_ALLOWED_HEADERS.split(', '),
   });
 
   app.useGlobalPipes(
