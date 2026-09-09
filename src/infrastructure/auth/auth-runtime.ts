@@ -1,32 +1,25 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
+import { BETTER_AUTH_ROUTE_PREFIX } from './auth.constants';
+import type { AuthModule, BetterAuthInstance } from './auth.types';
 import { importEsm } from './esm-import';
 import { toNodeHandler } from './node-handler';
 
-type AuthModule = {
-  getAuth: () => Promise<{
-    api: {
-      getSession: (input: { headers: HeadersInit }) => Promise<{
-        user?: { id: string; email: string };
-      } | null>;
-    };
-    handler: (request: Request) => Promise<Response>;
-  }>;
-};
-
-let authPromise: ReturnType<AuthModule['getAuth']> | null = null;
+let authPromise: Promise<BetterAuthInstance> | null = null;
 
 function authModuleUrl(): string {
   return pathToFileURL(join(__dirname, '../../../auth/auth.mjs')).href;
 }
 
-/**
- * Carga Better Auth como ESM desde NestJS (CommonJS) sin usar require().
- */
-export async function getAuth() {
+async function loadAuthModule(): Promise<AuthModule> {
+  return importEsm<AuthModule>(authModuleUrl());
+}
+
+/** Carga Better Auth como ESM (NestJS CJS + Vercel serverless). */
+export async function getAuth(): Promise<BetterAuthInstance> {
   if (!authPromise) {
-    const module = await importEsm<AuthModule>(authModuleUrl());
+    const module = await loadAuthModule();
     authPromise = module.getAuth();
   }
   return authPromise;
@@ -35,13 +28,12 @@ export async function getAuth() {
 export async function mountBetterAuth(expressApp: {
   use: (handler: unknown) => void;
 }): Promise<void> {
-  const authModule = await importEsm<AuthModule>(authModuleUrl());
-  const auth = await authModule.getAuth();
+  const auth = await getAuth();
   const handler = toNodeHandler(auth);
 
-  // Express 5 no admite `/api/auth/*`; interceptamos por prefijo.
+  // Express 5 no admite wildcards tipo `/api/auth/*`.
   expressApp.use((req: IncomingMessage & { path?: string }, res: ServerResponse, next: () => void) => {
-    if (!req.path?.startsWith('/api/auth')) {
+    if (!req.path?.startsWith(BETTER_AUTH_ROUTE_PREFIX)) {
       next();
       return;
     }

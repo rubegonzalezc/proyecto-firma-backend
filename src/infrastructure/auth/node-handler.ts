@@ -1,8 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'http';
+import type { BetterAuthInstance } from './auth.types';
 
-type AuthHandler = {
-  handler: (request: Request) => Promise<Response>;
-};
+type NodeRequest = IncomingMessage & { originalUrl?: string };
 
 async function readRequestBody(req: IncomingMessage): Promise<Buffer | undefined> {
   if (!req.method || req.method === 'GET' || req.method === 'HEAD') {
@@ -17,17 +16,18 @@ async function readRequestBody(req: IncomingMessage): Promise<Buffer | undefined
   return chunks.length > 0 ? Buffer.concat(chunks) : undefined;
 }
 
-function buildRequestUrl(req: IncomingMessage): string {
+function buildRequestUrl(req: NodeRequest): string {
   const host = req.headers.host ?? 'localhost';
   const forwardedProto = req.headers['x-forwarded-proto'];
   const protocol = Array.isArray(forwardedProto)
     ? forwardedProto[0]
     : forwardedProto ?? 'https';
+  const path = req.originalUrl ?? req.url ?? '/';
 
-  return `${protocol}://${host}${req.url ?? '/'}`;
+  return `${protocol}://${host}${path}`;
 }
 
-async function toFetchRequest(req: IncomingMessage): Promise<Request> {
+async function toFetchRequest(req: NodeRequest): Promise<Request> {
   const body = await readRequestBody(req);
   const headers = new Headers();
 
@@ -54,15 +54,13 @@ async function sendFetchResponse(res: ServerResponse, response: Response): Promi
     res.setHeader(key, value);
   });
 
-  const buffer = Buffer.from(await response.arrayBuffer());
-  res.end(buffer);
+  res.end(Buffer.from(await response.arrayBuffer()));
 }
 
-/** Adaptador Express/Node sin depender de `better-auth/node` (no siempre incluido en Vercel). */
-export function toNodeHandler(auth: AuthHandler) {
-  return async (req: IncomingMessage, res: ServerResponse) => {
-    const request = await toFetchRequest(req);
-    const response = await auth.handler(request);
+/** Adaptador Express/Node sin depender de `better-auth/node`. */
+export function toNodeHandler(auth: BetterAuthInstance) {
+  return async (req: NodeRequest, res: ServerResponse) => {
+    const response = await auth.handler(await toFetchRequest(req));
     await sendFetchResponse(res, response);
   };
 }

@@ -154,16 +154,22 @@ recibe por correo más un código de un solo uso.
 ## Arquitectura
 
 ```
+auth/
+└── auth.mjs              # Instancia Better Auth (ESM, compatible con Vercel)
+
 src/
-├── config/           # Variables de entorno validadas
-├── common/           # Decorators, filters, types
+├── bootstrap/            # Arranque compartido (local + serverless)
+├── config/               # Variables de entorno validadas
+├── common/               # Decorators, filters, types
 ├── infrastructure/
-│   └── supabase/     # Cliente Supabase (solo admin/service role)
+│   ├── auth/             # Runtime ESM, adaptador Node y guard
+│   └── supabase/         # Cliente Supabase (service role)
 └── modules/
-    ├── auth/         # Guard placeholder + perfil (BetterAuth pendiente)
-    ├── documents/    # CRUD + upload + firma
-    ├── verification/ # Endpoint público
-    └── health/
+    ├── auth/             # Perfil autenticado
+    ├── documents/        # CRUD + upload
+    ├── envelopes/        # Sobres multi-firmante
+    ├── signing-portal/   # Portal público de firma
+    └── verification/     # Verificación pública
 ```
 
 ## Flujo de firma multi-parte

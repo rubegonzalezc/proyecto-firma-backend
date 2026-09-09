@@ -3,7 +3,6 @@ import { ConfigModule } from '@nestjs/config';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { APP_GUARD } from '@nestjs/core';
 import appConfig from './config/app.config';
-import betterAuthConfig from './config/better-auth.config';
 import supabaseConfig from './config/supabase.config';
 import { envValidationSchema } from './config/env.validation';
 import { SupabaseModule } from './infrastructure/supabase/supabase.module';
@@ -21,7 +20,7 @@ import { HealthModule } from './modules/health/health.module';
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      load: [appConfig, supabaseConfig, betterAuthConfig],
+      load: [appConfig, supabaseConfig],
       validationSchema: envValidationSchema,
       validationOptions: { abortEarly: true, convert: true },
     }),

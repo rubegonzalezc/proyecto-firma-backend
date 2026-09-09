@@ -1,16 +1,9 @@
 import { ConfigService } from '@nestjs/config';
-import { NestFactory } from '@nestjs/core';
-import type { NestExpressApplication } from '@nestjs/platform-express';
-import { AppModule } from './app.module';
-import { configureApp } from './configure-app';
+import { createNestApplication } from './bootstrap/nest-app';
+import { BETTER_AUTH_ROUTE_PREFIX } from './infrastructure/auth/auth.constants';
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
-    logger: ['error', 'warn', 'log'],
-    bodyParser: false,
-  });
-
-  await configureApp(app);
+  const app = await createNestApplication();
 
   const config = app.get(ConfigService);
   const port = config.get<number>('app.port', 3000);
@@ -19,7 +12,7 @@ async function bootstrap() {
   await app.listen(port);
   console.log(`SynchroSign API running on http://localhost:${port}/${apiPrefix}`);
   console.log(`Swagger docs: http://localhost:${port}/docs`);
-  console.log(`BetterAuth: http://localhost:${port}/api/auth`);
+  console.log(`BetterAuth: http://localhost:${port}${BETTER_AUTH_ROUTE_PREFIX}`);
 }
 
 bootstrap();
