@@ -551,14 +551,21 @@ export class EnvelopesService {
     return data as DocumentRow;
   }
 
-  /** Crea un sobre de un firmante con campos por defecto y lo envía de inmediato. */
+  /** Crea un sobre con campos por defecto y lo envía de inmediato. */
   async createAndSendForSignature(
     user: AuthUser,
     documentId: string,
-    params: { signerEmail: string; message?: string },
+    params: {
+      signerEmail: string;
+      message?: string;
+      includeSender?: boolean;
+      ownerName?: string;
+      ownerEmail?: string;
+    },
     request?: Request,
   ) {
-    const signerTempId = 'signer-1';
+    const invitedTempId = 'signer-invited';
+    const ownerTempId = 'signer-owner';
     const email = params.signerEmail.trim().toLowerCase();
 
     const document = await this.getOwnedDocument(user.id, documentId);
@@ -568,46 +575,88 @@ export class EnvelopesService {
     const lastPage = pdf.getPage(pageCount - 1);
     const { width, height } = lastPage.getSize();
 
+    const signers = [
+      {
+        tempId: invitedTempId,
+        fullName: email.split('@')[0],
+        email,
+        roleLabel: 'Firmante',
+      },
+    ];
+
+    if (params.includeSender && params.ownerEmail) {
+      signers.push({
+        tempId: ownerTempId,
+        fullName: params.ownerName?.trim() || params.ownerEmail.split('@')[0],
+        email: params.ownerEmail,
+        roleLabel: 'Emisor',
+      });
+    }
+
+    const fields = [
+      {
+        signerTempId: invitedTempId,
+        page: pageCount,
+        x: 0.08,
+        y: params.includeSender ? 0.86 : 0.82,
+        w: 0.55,
+        h: 0.07,
+        type: FieldTypeDto.signature,
+        pageWidthPt: width,
+        pageHeightPt: height,
+        detectionSource: 'fallback' as const,
+      },
+      {
+        signerTempId: invitedTempId,
+        page: pageCount,
+        x: 0.66,
+        y: params.includeSender ? 0.86 : 0.82,
+        w: 0.24,
+        h: 0.05,
+        type: FieldTypeDto.date,
+        pageWidthPt: width,
+        pageHeightPt: height,
+        detectionSource: 'fallback' as const,
+      },
+    ];
+
+    if (params.includeSender) {
+      fields.push(
+        {
+          signerTempId: ownerTempId,
+          page: pageCount,
+          x: 0.08,
+          y: 0.74,
+          w: 0.55,
+          h: 0.07,
+          type: FieldTypeDto.signature,
+          pageWidthPt: width,
+          pageHeightPt: height,
+          detectionSource: 'fallback' as const,
+        },
+        {
+          signerTempId: ownerTempId,
+          page: pageCount,
+          x: 0.66,
+          y: 0.74,
+          w: 0.24,
+          h: 0.05,
+          type: FieldTypeDto.date,
+          pageWidthPt: width,
+          pageHeightPt: height,
+          detectionSource: 'fallback' as const,
+        },
+      );
+    }
+
     const bundle = await this.create(
       user,
       {
         documentId,
         mode: SigningModeDto.parallel,
         message: params.message,
-        signers: [
-          {
-            tempId: signerTempId,
-            fullName: email.split('@')[0],
-            email,
-            roleLabel: 'Firmante',
-          },
-        ],
-        fields: [
-          {
-            signerTempId,
-            page: pageCount,
-            x: 0.08,
-            y: 0.82,
-            w: 0.55,
-            h: 0.07,
-            type: FieldTypeDto.signature,
-            pageWidthPt: width,
-            pageHeightPt: height,
-            detectionSource: 'fallback',
-          },
-          {
-            signerTempId,
-            page: pageCount,
-            x: 0.66,
-            y: 0.82,
-            w: 0.24,
-            h: 0.05,
-            type: FieldTypeDto.date,
-            pageWidthPt: width,
-            pageHeightPt: height,
-            detectionSource: 'fallback',
-          },
-        ],
+        signers,
+        fields,
       },
       request,
     );

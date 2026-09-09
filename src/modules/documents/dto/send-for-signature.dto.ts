@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsEmail, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsBoolean, IsEmail, IsOptional, IsString, MaxLength } from 'class-validator';
 
 export class SendForSignatureDto {
   @ApiProperty({ example: 'firmante@empresa.cl' })
@@ -12,4 +12,12 @@ export class SendForSignatureDto {
   @IsString()
   @MaxLength(2000)
   message?: string;
+
+  @ApiPropertyOptional({
+    description: 'Si es true, el emisor también se añade como firmante del sobre',
+    default: false,
+  })
+  @IsOptional()
+  @IsBoolean()
+  includeSender?: boolean;
 }

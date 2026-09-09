@@ -42,7 +42,68 @@ export class DocumentsService {
     return `${segment()}-${segment()}-${segment()}`;
   }
 
-  private mapDocument(row: DocumentRow) {
+  private mapDocument(
+    row: DocumentRow,
+    envelope?: {
+      status: string;
+      sent_at: string | null;
+      completed_at: string | null;
+      signers: Array<{ full_name: string; email: string; status: string }>;
+    },
+  ) {
+    if (row.status === 'signed' || !envelope) {
+      return {
+        id: row.id,
+        name: row.name,
+        status: row.status,
+        signerName: row.signer_name,
+        signerEmail: row.signer_email,
+        verificationCode: row.verification_code,
+        signedSha256: row.signed_sha256,
+        createdAt: row.created_at,
+        signedAt: row.signed_at,
+      };
+    }
+
+    const pendingSigners = envelope.signers.filter(
+      (s) => !['signed', 'declined', 'expired'].includes(s.status),
+    );
+    const signedSigners = envelope.signers.filter((s) => s.status === 'signed');
+
+    if (envelope.status === 'completed') {
+      const signedBy = signedSigners
+        .map((s) => s.full_name?.trim() || s.email)
+        .join(', ');
+      return {
+        id: row.id,
+        name: row.name,
+        status: 'signed' as const,
+        signerName: signedBy || row.signer_name,
+        signerEmail: signedSigners[0]?.email ?? row.signer_email,
+        verificationCode: row.verification_code,
+        signedSha256: row.signed_sha256,
+        createdAt: row.created_at,
+        signedAt: envelope.completed_at ?? row.signed_at,
+      };
+    }
+
+    if (['sent', 'in_progress', 'declined'].includes(envelope.status)) {
+      const sentTo = pendingSigners
+        .map((s) => s.full_name?.trim() || s.email)
+        .join(', ');
+      return {
+        id: row.id,
+        name: row.name,
+        status: 'sent' as const,
+        signerName: sentTo || null,
+        signerEmail: pendingSigners[0]?.email ?? null,
+        verificationCode: row.verification_code,
+        signedSha256: row.signed_sha256,
+        createdAt: row.created_at,
+        signedAt: envelope.sent_at ?? row.signed_at,
+      };
+    }
+
     return {
       id: row.id,
       name: row.name,
@@ -64,7 +125,46 @@ export class DocumentsService {
       .order('created_at', { ascending: false });
 
     if (error) throw error;
-    return (data as DocumentRow[]).map((row) => this.mapDocument(row));
+    const rows = (data as DocumentRow[]) ?? [];
+    if (rows.length === 0) return [];
+
+    const docIds = rows.map((row) => row.id);
+    const { data: envelopes, error: envelopesError } = await this.supabase.admin
+      .from('envelopes')
+      .select('document_id, status, sent_at, completed_at, envelope_signers(full_name, email, status)')
+      .eq('user_id', user.id)
+      .in('document_id', docIds)
+      .not('status', 'eq', 'voided')
+      .order('sent_at', { ascending: false });
+
+    if (envelopesError) throw envelopesError;
+
+    const envelopeByDocument = new Map<
+      string,
+      {
+        status: string;
+        sent_at: string | null;
+        completed_at: string | null;
+        signers: Array<{ full_name: string; email: string; status: string }>;
+      }
+    >();
+
+    for (const envelope of envelopes ?? []) {
+      const documentId = envelope.document_id as string;
+      if (envelopeByDocument.has(documentId)) continue;
+      envelopeByDocument.set(documentId, {
+        status: envelope.status as string,
+        sent_at: envelope.sent_at as string | null,
+        completed_at: envelope.completed_at as string | null,
+        signers: ((envelope.envelope_signers as Array<{
+          full_name: string;
+          email: string;
+          status: string;
+        }>) ?? []),
+      });
+    }
+
+    return rows.map((row) => this.mapDocument(row, envelopeByDocument.get(row.id)));
   }
 
   findInbox(user: AuthUser) {
@@ -217,13 +317,34 @@ export class DocumentsService {
 
     const email = dto.signerEmail.trim().toLowerCase();
     if (email === user.email.trim().toLowerCase()) {
-      throw new BadRequestException('Usa "Firmar documento" para firmar tus propios archivos.');
+      throw new BadRequestException('Indica el correo de otra persona o marca que tú también firmarás.');
     }
+
+    const { data: activeEnvelope } = await this.supabase.admin
+      .from('envelopes')
+      .select('id')
+      .eq('document_id', id)
+      .eq('user_id', user.id)
+      .in('status', ['sent', 'in_progress'])
+      .maybeSingle();
+
+    if (activeEnvelope) {
+      throw new BadRequestException('Este documento ya fue enviado para firma.');
+    }
+
+    const profile = dto.includeSender ? await this.authService.getProfile(user) : null;
+    const ownerName = profile?.full_name?.trim() || user.email;
 
     return this.envelopes.createAndSendForSignature(
       user,
       id,
-      { signerEmail: email, message: dto.message },
+      {
+        signerEmail: email,
+        message: dto.message,
+        includeSender: dto.includeSender ?? false,
+        ownerName,
+        ownerEmail: user.email.trim().toLowerCase(),
+      },
       request,
     );
   }
