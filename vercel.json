@@ -7,7 +7,7 @@
   "functions": {
     "api/index.ts": {
       "maxDuration": 30,
-      "includeFiles": "{dist/**,auth/**}"
+      "includeFiles": "{dist/**,auth/**,node_modules/better-auth/**,node_modules/better-call/**,node_modules/jose/**,node_modules/nanostores/**}"
     }
   }
 }

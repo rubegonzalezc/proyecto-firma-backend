@@ -1,6 +1,7 @@
 import { join } from 'path';
 import { pathToFileURL } from 'url';
 import { importEsm } from './esm-import';
+import { toNodeHandler } from './node-handler';
 
 type AuthModule = {
   getAuth: () => Promise<{
@@ -11,12 +12,6 @@ type AuthModule = {
     };
     handler: (request: Request) => Promise<Response>;
   }>;
-};
-
-type BetterAuthNodeModule = {
-  toNodeHandler: (
-    auth: { handler: (request: Request) => Promise<Response> },
-  ) => (req: unknown, res: unknown) => void;
 };
 
 let authPromise: ReturnType<AuthModule['getAuth']> | null = null;
@@ -39,11 +34,7 @@ export async function getAuth() {
 export async function mountBetterAuth(expressApp: {
   all: (path: string, handler: unknown) => void;
 }): Promise<void> {
-  const [authModule, betterAuthNode] = await Promise.all([
-    importEsm<AuthModule>(authModuleUrl()),
-    importEsm<BetterAuthNodeModule>('better-auth/node'),
-  ]);
-
+  const authModule = await importEsm<AuthModule>(authModuleUrl());
   const auth = await authModule.getAuth();
-  expressApp.all('/api/auth/*', betterAuthNode.toNodeHandler(auth));
+  expressApp.all('/api/auth/*', toNodeHandler(auth));
 }
