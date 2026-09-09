@@ -1,4 +1,5 @@
 import { ConfigService } from '@nestjs/config';
+export { NestFactory } from '@nestjs/core';
 import { createNestApplication } from './bootstrap/nest-app';
 import { BETTER_AUTH_ROUTE_PREFIX } from './infrastructure/auth/auth.constants';
 
