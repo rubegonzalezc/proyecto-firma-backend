@@ -18,6 +18,7 @@ import type {
 import { sha256Hex } from '../../common/utils/hash';
 import { SupabaseService } from '../../infrastructure/supabase/supabase.service';
 import { AuditService } from '../audit/audit.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { SignerTokenService } from '../signer-access/signer-token.service';
 import { CreateEnvelopeDto, FieldTypeDto, SigningModeDto, UpdateEnvelopeDto } from './dto/envelope.dto';
 import { activeSigners, initialSignerStatus, validateBeforeSend } from './envelope-state';
@@ -37,6 +38,7 @@ export class EnvelopesService {
     private readonly supabase: SupabaseService,
     private readonly audit: AuditService,
     private readonly tokens: SignerTokenService,
+    private readonly notifications: NotificationsService,
     private readonly config: ConfigService,
   ) {}
 
@@ -327,6 +329,12 @@ export class EnvelopesService {
       eventType: 'envelope.sent',
       request,
       metadata: { signers: signers.length },
+    });
+
+    await this.notifications.notifyEnvelopeSent({
+      envelope: data as EnvelopeRow,
+      signers,
+      ownerUserId: user.id,
     });
 
     return { envelope: this.mapEnvelope(data as EnvelopeRow), links };

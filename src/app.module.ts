@@ -15,6 +15,7 @@ import { SigningModule } from './modules/signing/signing.module';
 import { SigningPortalModule } from './modules/signing-portal/signing-portal.module';
 import { VerificationModule } from './modules/verification/verification.module';
 import { HealthModule } from './modules/health/health.module';
+import { NotificationsModule } from './modules/notifications/notifications.module';
 
 @Module({
   imports: [
@@ -39,6 +40,7 @@ import { HealthModule } from './modules/health/health.module';
     SigningModule,
     SigningPortalModule,
     VerificationModule,
+    NotificationsModule,
     HealthModule,
   ],
   providers: [

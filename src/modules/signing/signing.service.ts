@@ -1,11 +1,16 @@
 import { BadRequestException, ForbiddenException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Request } from 'express';
-import type { EnvelopeSignerRow, SignatureFieldRow } from '../../common/types/database.types';
+import type {
+  EnvelopeRow,
+  EnvelopeSignerRow,
+  SignatureFieldRow,
+} from '../../common/types/database.types';
 import { sha256Hex } from '../../common/utils/hash';
 import { SupabaseService } from '../../infrastructure/supabase/supabase.service';
 import { AuditService } from '../audit/audit.service';
 import { DocumentAuditService } from '../audit/document-audit.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { EnvelopesService } from '../envelopes/envelopes.service';
 import {
   canSign,
@@ -34,6 +39,7 @@ export class SigningService {
     private readonly certificates: CertificateService,
     private readonly audit: AuditService,
     private readonly documentAudit: DocumentAuditService,
+    private readonly notifications: NotificationsService,
     private readonly config: ConfigService,
   ) {}
 
@@ -196,6 +202,12 @@ export class SigningService {
       sha256After: shaAfter,
     });
 
+    await this.notifications.notifySignerSigned({
+      envelope,
+      signer: { ...signer, full_name: displayName, status: 'signed' as const },
+      ownerUserId: envelope.user_id,
+    });
+
     const nextStatus = deriveEnvelopeStatus(updatedSigners, envelope.status);
 
     if (nextStatus !== 'completed') {
@@ -294,6 +306,20 @@ export class SigningService {
       metadata: { verificationCode, signers: params.signers.length },
       sha256After: finalSha256,
     });
+
+    const { data: envelopeRow } = await this.supabase.admin
+      .from('envelopes')
+      .select('*')
+      .eq('id', params.envelopeId)
+      .single();
+
+    if (envelopeRow) {
+      await this.notifications.notifyEnvelopeCompleted({
+        envelope: envelopeRow as EnvelopeRow,
+        signers: params.signers,
+        ownerUserId: params.userId,
+      });
+    }
   }
 
   /** Copia el PDF final del sobre al registro del documento fuente. */
