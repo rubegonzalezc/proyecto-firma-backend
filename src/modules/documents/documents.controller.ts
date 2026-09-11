@@ -46,6 +46,18 @@ export class DocumentsController {
     return this.documentsService.findInbox(user);
   }
 
+  @Get('inbox/:signerId/download')
+  @ApiOperation({ summary: 'Descargar PDF de una invitación de firma' })
+  @ApiQuery({ name: 'type', enum: ['original', 'signed'], required: false })
+  downloadInbox(
+    @CurrentUser() user: AuthUser,
+    @Param('signerId', ParseUUIDPipe) signerId: string,
+    @Query('type') type: 'original' | 'signed' = 'signed',
+    @Req() request: Request,
+  ) {
+    return this.documentsService.getInboxDownloadUrl(user, signerId, type, request);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Obtener documento por ID' })
   findOne(@CurrentUser() user: AuthUser, @Param('id', ParseUUIDPipe) id: string) {

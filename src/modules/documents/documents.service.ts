@@ -8,7 +8,7 @@ import { ConfigService } from '@nestjs/config';
 import type { Request } from 'express';
 import { randomBytes, randomUUID } from 'crypto';
 import type { AuthUser } from '../../common/types/database.types';
-import type { DocumentRow } from '../../common/types/database.types';
+import type { DocumentRow, EnvelopeRow } from '../../common/types/database.types';
 import { sha256Hex } from '../../common/utils/hash';
 import { SupabaseService } from '../../infrastructure/supabase/supabase.service';
 import { DocumentAuditService } from '../audit/document-audit.service';
@@ -169,6 +169,58 @@ export class DocumentsService {
 
   findInbox(user: AuthUser) {
     return this.envelopes.findInboxForSigner(user);
+  }
+
+  async getInboxDownloadUrl(
+    user: AuthUser,
+    signerId: string,
+    type: 'original' | 'signed',
+    request?: Request,
+  ) {
+    const { data: signer, error } = await this.supabase.admin
+      .from('envelope_signers')
+      .select('id, email, envelope_id, envelopes(*)')
+      .eq('id', signerId)
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!signer) throw new NotFoundException('Invitación no encontrada');
+
+    if ((signer.email as string).trim().toLowerCase() !== user.email.trim().toLowerCase()) {
+      throw new ForbiddenException('No tienes acceso a este documento');
+    }
+
+    const rawEnvelope = signer.envelopes as EnvelopeRow | EnvelopeRow[] | null;
+    const envelope = Array.isArray(rawEnvelope) ? rawEnvelope[0] : rawEnvelope;
+
+    if (!envelope) throw new NotFoundException('Sobre no encontrado');
+
+    const path =
+      type === 'original'
+        ? envelope.original_pdf_path
+        : envelope.status === 'completed' && envelope.final_pdf_path
+          ? envelope.final_pdf_path
+          : envelope.current_pdf_path;
+
+    if (!path) throw new NotFoundException('Archivo no disponible');
+
+    const { data, error: urlError } = await this.supabase.admin.storage
+      .from(this.supabase.documentsBucket)
+      .createSignedUrl(path, 300);
+
+    if (urlError || !data?.signedUrl) {
+      throw new NotFoundException('No se pudo generar URL de descarga');
+    }
+
+    await this.documentAudit.record({
+      documentId: envelope.document_id,
+      userId: user.id,
+      eventType: 'document.downloaded',
+      request,
+      metadata: { type, signerId, via: 'inbox' },
+    });
+
+    return { url: data.signedUrl, expiresIn: 300 };
   }
 
   async findOne(user: AuthUser, id: string) {
@@ -420,11 +472,7 @@ export class DocumentsService {
     request?: Request,
   ) {
     const doc = await this.getOwnedDocument(user.id, id);
-    let path = type === 'signed' ? doc.signed_pdf_path : doc.original_pdf_path;
-
-    if (type === 'signed' && !path) {
-      path = await this.resolveSignedPathFromEnvelope(user.id, id, doc);
-    }
+    const path = await this.resolveOwnerDownloadPath(user.id, id, doc, type);
 
     if (!path) throw new NotFoundException('Archivo no disponible');
 
@@ -461,6 +509,38 @@ export class DocumentsService {
 
     if (error) throw error;
     return { deleted: true };
+  }
+
+  private async resolveOwnerDownloadPath(
+    userId: string,
+    documentId: string,
+    doc: DocumentRow,
+    type: 'original' | 'signed',
+  ): Promise<string | null> {
+    if (type === 'original') return doc.original_pdf_path;
+    if (doc.signed_pdf_path) return doc.signed_pdf_path;
+
+    const { data: envelope } = await this.supabase.admin
+      .from('envelopes')
+      .select('status, final_pdf_path, current_pdf_path')
+      .eq('document_id', documentId)
+      .eq('user_id', userId)
+      .not('status', 'eq', 'voided')
+      .order('sent_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!envelope) return null;
+
+    if (envelope.status === 'completed' && envelope.final_pdf_path) {
+      return this.resolveSignedPathFromEnvelope(userId, documentId, doc);
+    }
+
+    if (['sent', 'in_progress'].includes(envelope.status as string)) {
+      return (envelope.current_pdf_path as string) ?? doc.original_pdf_path;
+    }
+
+    return this.resolveSignedPathFromEnvelope(userId, documentId, doc);
   }
 
   /** Recupera el PDF firmado desde un sobre completado y sincroniza el documento si faltaba. */
