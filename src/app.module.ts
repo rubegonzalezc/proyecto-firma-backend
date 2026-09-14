@@ -21,6 +21,7 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
+      envFilePath: ['.env.local', '.env'],
       load: [appConfig, supabaseConfig],
       validationSchema: envValidationSchema,
       validationOptions: { abortEarly: true, convert: true },
