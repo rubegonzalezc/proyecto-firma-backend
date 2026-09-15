@@ -24,6 +24,20 @@ export enum SigningModeDto {
   parallel = 'parallel',
 }
 
+export enum SignatureLevelDto {
+  fes = 'fes',
+  fes_verificada = 'fes_verificada',
+  fea = 'fea',
+}
+
+export enum SignatureMethodDto {
+  draw = 'draw',
+  type = 'type',
+  upload = 'upload',
+  click = 'click',
+  certificate = 'certificate',
+}
+
 export enum FieldTypeDto {
   signature = 'signature',
   initials = 'initials',
@@ -56,6 +70,25 @@ export class SignerInputDto {
   @IsString()
   @MaxLength(80)
   roleLabel?: string;
+
+  @ApiPropertyOptional({
+    enum: SignatureMethodDto,
+    isArray: true,
+    description:
+      'Métodos que este firmante puede usar. Si se omite, se derivan del tipo de documento.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(5)
+  @IsEnum(SignatureMethodDto, { each: true })
+  allowedMethods?: SignatureMethodDto[];
+
+  @ApiPropertyOptional({
+    description: 'Exigir el RUT del firmante. El tipo de documento puede forzarlo a true.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  requireRut?: boolean;
 }
 
 export class FieldInputDto {
@@ -151,6 +184,24 @@ export class CreateEnvelopeDto {
   @IsEnum(SigningModeDto)
   mode!: SigningModeDto;
 
+  @ApiPropertyOptional({
+    example: 'contrato_arrendamiento',
+    description: 'Id del catálogo legal. Determina el nivel de firma exigido y los métodos.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  documentType?: string;
+
+  @ApiPropertyOptional({
+    enum: SignatureLevelDto,
+    description:
+      'Nivel exigido. Solo puede subir respecto del mínimo del tipo de documento, nunca bajarlo.',
+  })
+  @IsOptional()
+  @IsEnum(SignatureLevelDto)
+  requiredLevel?: SignatureLevelDto;
+
   @ApiProperty({ type: [SignerInputDto] })
   @IsArray()
   @ArrayMinSize(1)
@@ -190,6 +241,17 @@ export class UpdateEnvelopeDto {
   @IsOptional()
   @IsString()
   expiresAt?: string;
+
+  @ApiPropertyOptional({ example: 'nda' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  documentType?: string;
+
+  @ApiPropertyOptional({ enum: SignatureLevelDto })
+  @IsOptional()
+  @IsEnum(SignatureLevelDto)
+  requiredLevel?: SignatureLevelDto;
 }
 
 export class VoidEnvelopeDto {

@@ -13,6 +13,16 @@ export const envValidationSchema = Joi.object({
   APP_VERIFY_BASE_URL: Joi.string().uri().optional(),
   APP_PORTAL_BASE_URL: Joi.string().uri().optional(),
 
+  // Sin clave el portal no puede entregar el código de un solo uso, así que en
+  // producción el firmante externo se queda fuera: se exige.
+  RESEND_API_KEY: Joi.string().when('NODE_ENV', {
+    is: 'production',
+    then: Joi.required(),
+    otherwise: Joi.optional().allow(''),
+  }),
+  MAIL_FROM: Joi.string().optional().allow(''),
+  MAIL_REPLY_TO: Joi.string().optional().allow(''),
+
   SIGNER_JWT_SECRET: Joi.string().min(32).when('NODE_ENV', {
     is: 'production',
     then: Joi.required(),

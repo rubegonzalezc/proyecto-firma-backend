@@ -10,7 +10,7 @@
 type Row = Record<string, any>;
 
 interface Filter {
-  kind: 'eq' | 'is' | 'in';
+  kind: 'eq' | 'is' | 'in' | 'ilike' | 'neq';
   column: string;
   value: any;
 }
@@ -18,7 +18,14 @@ interface Filter {
 function matches(row: Row, filters: Filter[]): boolean {
   return filters.every((f) => {
     if (f.kind === 'eq') return row[f.column] === f.value;
+    if (f.kind === 'neq') return row[f.column] !== f.value;
     if (f.kind === 'is') return (row[f.column] ?? null) === f.value;
+    if (f.kind === 'ilike') {
+      // Solo se usa para comparar correos sin distinguir mayúsculas; el
+      // comodín `%` de SQL no hace falta para eso.
+      const pattern = String(f.value).replace(/%/g, '').toLowerCase();
+      return String(row[f.column] ?? '').toLowerCase() === pattern;
+    }
     return Array.isArray(f.value) && f.value.includes(row[f.column]);
   });
 }
@@ -83,6 +90,20 @@ class QueryBuilder {
     return this;
   }
 
+  ilike(column: string, value: string) {
+    this.filters.push({ kind: 'ilike', column, value });
+    return this;
+  }
+
+  /** `not('status', 'eq', 'voided')` — la única negación que usan los servicios. */
+  not(column: string, operator: string, value: any) {
+    if (operator !== 'eq') {
+      throw new Error(`El doble de Supabase no implementa not(${operator})`);
+    }
+    this.filters.push({ kind: 'neq', column, value });
+    return this;
+  }
+
   order(column: string, opts?: { ascending?: boolean }) {
     this.orderColumn = column;
     this.orderAsc = opts?.ascending ?? true;
@@ -117,16 +138,32 @@ class QueryBuilder {
     if (this.limitTo !== null) result = result.slice(0, this.limitTo);
 
     // Une la relación embebida que piden los servicios: `select('*, tabla(*)')`.
-    // La clave foránea no siempre se llama `<tabla_en_singular>_id`
+    //
+    // Se resuelven las dos direcciones. Uno-a-uno: la fila padre guarda la
+    // clave foránea, que no siempre se llama `<tabla_en_singular>_id`
     // (signer_tokens apunta a envelope_signers por `signer_id`), así que se
     // busca la primera columna `_id` cuyo valor exista en la tabla embebida.
+    // Uno-a-muchos: la clave la guardan los hijos y hay que devolver el array
+    // —`envelopes` con sus `envelope_signers`—. Antes solo existía el primer
+    // caso y el segundo devolvía un único hijo en silencio, que es peor que
+    // fallar: las pruebas pasaban contra una forma que el cliente real no
+    // produce nunca.
     if (this.embed) {
       const children = this.db.rows(this.embed);
       result = result.map((row) => {
         const fk = Object.keys(row).find(
           (key) => key.endsWith('_id') && children.some((child) => child.id === row[key]),
         );
-        return { ...row, [this.embed!]: fk ? children.find((c) => c.id === row[fk]) : null };
+        if (fk) return { ...row, [this.embed!]: children.find((c) => c.id === row[fk]) };
+
+        const childFk = children
+          .flatMap((child) => Object.keys(child))
+          .find((key) => key.endsWith('_id') && children.some((child) => child[key] === row.id));
+
+        return {
+          ...row,
+          [this.embed!]: childFk ? children.filter((child) => child[childFk] === row.id) : null,
+        };
       });
     }
 

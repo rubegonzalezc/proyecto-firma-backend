@@ -1,6 +1,9 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import type { EnvelopeRow, EnvelopeSignerRow } from '../../common/types/database.types';
+import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../../infrastructure/supabase/supabase.service';
+import { MailService } from '../mail/mail.service';
+import { envelopeCompletedEmail, signerSignedEmail } from '../mail/mail.templates';
 
 export type NotificationType =
   | 'signature_requested'
@@ -21,7 +24,26 @@ export interface CreateNotificationInput {
 export class NotificationsService {
   private readonly logger = new Logger(NotificationsService.name);
 
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly mail: MailService,
+    private readonly config: ConfigService,
+  ) {}
+
+  /** Correo del propietario del sobre, para los avisos que le corresponden. */
+  private async ownerEmail(userId: string): Promise<string | null> {
+    const { data } = await this.supabase.admin
+      .from('profiles')
+      .select('email')
+      .eq('id', userId)
+      .maybeSingle();
+    return (data?.email as string | undefined) ?? null;
+  }
+
+  private appUrl(path: string): string {
+    const base = (this.config.get<string>('app.verifyBaseUrl') ?? '').replace(/\/$/, '');
+    return `${base}${path}`;
+  }
 
   async listForUser(userId: string, unreadOnly = false, limit = 30) {
     let query = this.supabase.admin
@@ -162,6 +184,8 @@ export class NotificationsService {
     envelope: EnvelopeRow;
     signer: EnvelopeSignerRow;
     ownerUserId: string;
+    /** Firmas que faltan; se cuenta fuera porque aquí solo llega una. */
+    remaining?: number;
   }): Promise<void> {
     const signerName = params.signer.full_name?.trim() || params.signer.email;
 
@@ -173,6 +197,22 @@ export class NotificationsService {
       envelopeId: params.envelope.id,
       documentId: params.envelope.document_id,
       actionPath: '/documents',
+    });
+
+    const email = await this.ownerEmail(params.ownerUserId);
+    if (!email) return;
+
+    // Aviso de cortesía: `critical: false` porque la firma ya está estampada y
+    // un correo que no sale no puede tumbarla.
+    await this.mail.send({
+      to: email,
+      tag: 'signer-signed',
+      email: signerSignedEmail({
+        signerName,
+        documentName: params.envelope.name,
+        remaining: params.remaining ?? 0,
+        reviewUrl: this.appUrl('/documents'),
+      }),
     });
   }
 
@@ -202,6 +242,30 @@ export class NotificationsService {
         actionPath: '/documents',
       })),
     );
+
+    if (!params.envelope.verification_code) return;
+
+    const verifyUrl = this.appUrl(`/verify/${params.envelope.verification_code}`);
+    const completed = envelopeCompletedEmail({
+      documentName: params.envelope.name,
+      verificationCode: params.envelope.verification_code,
+      verifyUrl,
+      signerCount: params.signers.length,
+    });
+
+    // Al propietario y a cada firmante, tenga cuenta o no: el firmante externo
+    // no tiene panel donde mirar, y sin este correo nunca sabría que el
+    // documento se cerró ni cómo descargarlo.
+    const ownerAddress = await this.ownerEmail(params.ownerUserId);
+    const recipients = new Set(
+      [ownerAddress, ...params.signers.map((s) => s.email)].filter(
+        (value): value is string => Boolean(value),
+      ),
+    );
+
+    for (const to of recipients) {
+      await this.mail.send({ to, tag: 'envelope-completed', email: completed });
+    }
   }
 
   private mapNotification(row: Record<string, unknown>) {

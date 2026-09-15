@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -20,7 +21,19 @@ import { SupabaseService } from '../../infrastructure/supabase/supabase.service'
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { SignerTokenService } from '../signer-access/signer-token.service';
-import { CreateEnvelopeDto, FieldTypeDto, SigningModeDto, UpdateEnvelopeDto } from './dto/envelope.dto';
+import { LegalService } from '../legal/legal.service';
+import { MailService } from '../mail/mail.service';
+import { signatureRequestEmail } from '../mail/mail.templates';
+import type { SignatureMethod } from '../legal/signature-levels';
+import type { DetectedPlacementDto } from '../documents/dto/send-for-signature.dto';
+import {
+  CreateEnvelopeDto,
+  FieldInputDto,
+  FieldTypeDto,
+  SignatureLevelDto,
+  SigningModeDto,
+  UpdateEnvelopeDto,
+} from './dto/envelope.dto';
 import { activeSigners, initialSignerStatus, validateBeforeSend } from './envelope-state';
 
 const DOWNLOAD_URL_TTL_SECONDS = 300;
@@ -34,11 +47,15 @@ export interface EnvelopeBundle {
 
 @Injectable()
 export class EnvelopesService {
+  private readonly logger = new Logger(EnvelopesService.name);
+
   constructor(
     private readonly supabase: SupabaseService,
     private readonly audit: AuditService,
     private readonly tokens: SignerTokenService,
     private readonly notifications: NotificationsService,
+    private readonly legal: LegalService,
+    private readonly mail: MailService,
     private readonly config: ConfigService,
   ) {}
 
@@ -80,15 +97,37 @@ export class EnvelopesService {
   }
 
   async upload(path: string, bytes: Buffer): Promise<void> {
+    return this.uploadBinary(path, bytes, 'application/pdf');
+  }
+
+  /**
+   * Sube cualquier binario al bucket privado. La imagen de la firma se guarda
+   * aparte del PDF para poder peritarla sin tener que extraerla del documento.
+   */
+  async uploadBinary(path: string, bytes: Buffer, contentType: string): Promise<void> {
     const { error } = await this.supabase.admin.storage
       .from(this.supabase.documentsBucket)
-      .upload(path, bytes, { contentType: 'application/pdf', upsert: true });
+      .upload(path, bytes, { contentType, upsert: true });
 
     if (error) throw error;
   }
 
   async create(user: AuthUser, dto: CreateEnvelopeDto, request?: Request): Promise<EnvelopeBundle> {
     const document = await this.getOwnedDocument(user.id, dto.documentId);
+
+    // El tipo de documento decide el nivel de firma y los métodos disponibles.
+    // Se resuelve aquí y no al firmar: si la ley no permite cerrar este acto
+    // electrónicamente, el sobre no debería llegar a existir.
+    const legal = this.legal.recommend(dto.documentType, dto.requiredLevel);
+    if (!legal.signableHere) {
+      throw new BadRequestException({
+        message: legal.blockingReason,
+        code: 'DOCUMENT_TYPE_NOT_SIGNABLE',
+        documentType: legal.documentType.id,
+        requiredLevel: legal.requiredLevel,
+        obligations: legal.documentType.obligations,
+      });
+    }
 
     const originalBytes = await this.download(document.original_pdf_path);
     const originalSha256 = sha256Hex(originalBytes);
@@ -118,6 +157,12 @@ export class EnvelopesService {
         original_pdf_path: originalPath,
         current_pdf_path: currentPath,
         original_sha256: originalSha256,
+        document_type: legal.documentType.id,
+        required_level: legal.requiredLevel,
+        legal_framework: 'CL',
+        // Se congela el texto aceptado: el catálogo puede cambiar de redacción
+        // y la prueba tiene que seguir apuntando a lo que se aceptó ese día.
+        consent_text: legal.consentText,
       })
       .select('*')
       .single();
@@ -130,6 +175,11 @@ export class EnvelopesService {
     const signerRows = dto.signers.map((signer, index) => {
       const id = crypto.randomUUID();
       idByTemp.set(signer.tempId, id);
+      // El emisor puede restringir los métodos, nunca ampliarlos más allá de lo
+      // que el tipo de documento admite.
+      const requested = (signer.allowedMethods ?? []) as SignatureMethod[];
+      const allowed = requested.filter((m) => legal.allowedMethods.includes(m));
+
       return {
         id,
         envelope_id: envelopeId,
@@ -138,6 +188,8 @@ export class EnvelopesService {
         email: signer.email.trim().toLowerCase(),
         role_label: signer.roleLabel ?? null,
         status: initialSignerStatus(index, dto.mode),
+        allowed_methods: allowed.length > 0 ? allowed : legal.allowedMethods,
+        require_rut: signer.requireRut ?? legal.requireRut,
       };
     });
 
@@ -233,7 +285,11 @@ export class EnvelopesService {
       .order('created_at', { ascending: false });
 
     if (error) throw error;
-    return (data as EnvelopeRow[]).map((row) => this.mapEnvelope(row));
+
+    const rows = await Promise.all(
+      (data as EnvelopeRow[]).map((row) => this.applyExpiry(row)),
+    );
+    return rows.map((row) => this.mapEnvelope(row));
   }
 
   async findOne(user: AuthUser, id: string) {
@@ -252,6 +308,21 @@ export class EnvelopesService {
       throw new BadRequestException('Solo se puede modificar un sobre en borrador');
     }
 
+    const legal =
+      dto.documentType || dto.requiredLevel
+        ? this.legal.recommend(
+            dto.documentType ?? envelope.document_type,
+            dto.requiredLevel ?? envelope.required_level,
+          )
+        : null;
+
+    if (legal && !legal.signableHere) {
+      throw new BadRequestException({
+        message: legal.blockingReason,
+        code: 'DOCUMENT_TYPE_NOT_SIGNABLE',
+      });
+    }
+
     const { data, error } = await this.supabase.admin
       .from('envelopes')
       .update({
@@ -259,12 +330,30 @@ export class EnvelopesService {
         message: dto.message ?? envelope.message,
         mode: dto.mode ?? envelope.mode,
         expires_at: dto.expiresAt ?? envelope.expires_at,
+        ...(legal
+          ? {
+              document_type: legal.documentType.id,
+              required_level: legal.requiredLevel,
+              consent_text: legal.consentText,
+            }
+          : {}),
       })
       .eq('id', id)
       .select('*')
       .single();
 
     if (error) throw error;
+
+    // Cambiar el tipo de documento cambia lo que se le permite al firmante.
+    // Sin esto, un borrador que pasa de NDA a contrato de trabajo conservaría
+    // los métodos laxos del NDA.
+    if (legal) {
+      await this.supabase.admin
+        .from('envelope_signers')
+        .update({ allowed_methods: legal.allowedMethods, require_rut: legal.requireRut })
+        .eq('envelope_id', id);
+    }
+
     return this.mapEnvelope(data as EnvelopeRow);
   }
 
@@ -294,15 +383,51 @@ export class EnvelopesService {
       envelope.expires_at ??
       new Date(Date.now() + DEFAULT_EXPIRY_DAYS * 86_400_000).toISOString();
 
-    const links: Array<{ signerId: string; email: string; url: string }> = [];
+    const senderName = await this.displayNameOf(user);
+    const rule = this.legal.rule(envelope.document_type);
+
+    const links: Array<{
+      signerId: string;
+      email: string;
+      url: string;
+      emailed: boolean;
+    }> = [];
+
     for (const signer of signers) {
       const token = await this.tokens.issue(signer.id, expiresAt);
-      links.push({ signerId: signer.id, email: signer.email, url: this.portalUrl(token) });
+      const url = this.portalUrl(token);
 
       await this.supabase.admin
         .from('envelope_signers')
         .update({ status: signer.status === 'waiting' ? 'waiting' : 'notified' })
         .eq('id', signer.id);
+
+      // En modo secuencial solo se avisa a quien ya puede firmar: mandarle el
+      // enlace al tercero de la fila solo consigue que lo abra, vea «todavía no
+      // es tu turno» y lo dé por roto.
+      const shouldEmail = signer.status !== 'waiting';
+      let emailed = false;
+
+      if (shouldEmail) {
+        const result = await this.mail.send({
+          to: signer.email,
+          tag: 'signature-request',
+          email: signatureRequestEmail({
+            signerName: signer.full_name,
+            signerEmail: signer.email,
+            documentName: envelope.name,
+            senderName,
+            message: envelope.message,
+            signUrl: url,
+            documentTypeLabel: rule.label,
+            requiresRut: signer.require_rut,
+            expiresAt,
+          }),
+        });
+        emailed = result.delivered;
+      }
+
+      links.push({ signerId: signer.id, email: signer.email, url, emailed });
 
       await this.audit.record({
         envelopeId: id,
@@ -310,7 +435,14 @@ export class EnvelopesService {
         actorType: 'system',
         eventType: 'signer.invited',
         request,
-        metadata: { email: signer.email, order: signer.order_index },
+        metadata: {
+          email: signer.email,
+          order: signer.order_index,
+          emailed,
+          // Se deja constancia de quién recibió aviso y quién quedó en espera:
+          // es lo primero que se pregunta cuando alguien «no recibió nada».
+          deferred: !shouldEmail,
+        },
       });
     }
 
@@ -338,6 +470,118 @@ export class EnvelopesService {
     });
 
     return { envelope: this.mapEnvelope(data as EnvelopeRow), links };
+  }
+
+  /**
+   * Traduce las zonas detectadas en el navegador a campos del sobre.
+   *
+   * Se descarta lo que no cuadre con el documento real —página inexistente, caja
+   * fuera de los límites— en vez de confiar en el cliente: son coordenadas que
+   * deciden dónde se estampa una firma en un contrato.
+   */
+  private fieldsFromPlacements(
+    placements: DetectedPlacementDto[],
+    ctx: { invitedTempId: string; ownerTempId: string; includeSender: boolean; pageCount: number },
+  ): FieldInputDto[] {
+    const fields: FieldInputDto[] = [];
+
+    for (const placement of placements) {
+      if (placement.page > ctx.pageCount) {
+        this.logger.warn(
+          `Zona descartada: página ${placement.page} de un documento con ${ctx.pageCount}`,
+        );
+        continue;
+      }
+
+      if (placement.x + placement.w > 1.0001 || placement.y + placement.h > 1.0001) {
+        this.logger.warn('Zona descartada: se sale de los límites de la página');
+        continue;
+      }
+
+      // Sin emisor firmante todo va al invitado; con emisor, la segunda columna
+      // detectada es la suya.
+      const signerTempId =
+        ctx.includeSender && placement.partyIndex === 1 ? ctx.ownerTempId : ctx.invitedTempId;
+
+      fields.push({
+        signerTempId,
+        page: placement.page,
+        x: placement.x,
+        y: placement.y,
+        w: placement.w,
+        h: placement.h,
+        type: placement.type ?? FieldTypeDto.signature,
+        pageWidthPt: placement.pageWidthPt,
+        pageHeightPt: placement.pageHeightPt,
+        detectionSource: 'heuristic',
+        detectionConfidence: placement.confidence,
+      });
+    }
+
+    // Un sobre sin campos para alguna parte no se puede enviar. Si el detector
+    // no encontró nada para el emisor, se le da su propio bloque al pie en vez
+    // de dejar el sobre en un estado que `validateBeforeSend` rechazará.
+    if (ctx.includeSender && !fields.some((f) => f.signerTempId === ctx.ownerTempId)) {
+      return [];
+    }
+
+    return fields;
+  }
+
+  /**
+   * Avisa por correo al firmante que acaba de quedar habilitado.
+   *
+   * En secuencial el enlace se emite al enviar el sobre, pero no se manda hasta
+   * que llega su turno. Sin este aviso, el segundo de la fila tendría que
+   * adivinar cuándo le toca.
+   */
+  async notifyTurn(envelope: EnvelopeRow, signer: EnvelopeSignerRow): Promise<void> {
+    const expiresAt =
+      envelope.expires_at ??
+      new Date(Date.now() + DEFAULT_EXPIRY_DAYS * 86_400_000).toISOString();
+
+    try {
+      const token = await this.tokens.reissue(signer.id, expiresAt);
+      const rule = this.legal.rule(envelope.document_type);
+      const senderName = await this.displayNameOf({
+        id: envelope.user_id,
+        email: '',
+        role: 'user',
+      });
+
+      await this.mail.send({
+        to: signer.email,
+        tag: 'signature-request',
+        email: signatureRequestEmail({
+          signerName: signer.full_name,
+          signerEmail: signer.email,
+          documentName: envelope.name,
+          senderName,
+          message: envelope.message,
+          signUrl: this.portalUrl(token),
+          documentTypeLabel: rule.label,
+          requiresRut: signer.require_rut,
+          expiresAt,
+        }),
+      });
+    } catch (error) {
+      // La firma anterior ya está estampada: que falle este aviso no puede
+      // deshacerla. Queda en el log y el firmante siempre puede pedir su enlace.
+      this.logger.error(
+        `No se pudo avisar del turno a ${signer.email}: ${error instanceof Error ? error.message : 'error desconocido'}`,
+      );
+    }
+  }
+
+  /** Nombre visible del emisor, para firmar el correo de invitación. */
+  private async displayNameOf(user: AuthUser): Promise<string> {
+    const { data } = await this.supabase.admin
+      .from('profiles')
+      .select('full_name')
+      .eq('id', user.id)
+      .maybeSingle();
+
+    return ((data?.full_name as string | undefined)?.trim() || user.email || 'SynchroSign').trim();
   }
 
   private portalUrl(token: string): string {
@@ -510,6 +754,46 @@ export class EnvelopesService {
     return this.audit.listForEnvelope(id);
   }
 
+  /**
+   * Aplica la caducidad de un sobre cuando se lee.
+   *
+   * Se resuelve al leer y no con una tarea programada porque el despliegue es
+   * serverless: un cron ahí es infraestructura aparte que hay que montar,
+   * vigilar y pagar, y el efecto que importa —que nadie pueda firmar un sobre
+   * caducado, y que la lista no lo muestre como vivo— se consigue igual en el
+   * momento en que alguien lo mira.
+   *
+   * El enlace ya caducaba por su cuenta (`SignerTokenService` comprueba la
+   * fecha del token). Lo que faltaba era que el sobre lo reflejara.
+   */
+  private async applyExpiry(envelope: EnvelopeRow): Promise<EnvelopeRow> {
+    const stillOpen = envelope.status === 'sent' || envelope.status === 'in_progress';
+    if (!stillOpen || !envelope.expires_at) return envelope;
+    if (new Date(envelope.expires_at).getTime() > Date.now()) return envelope;
+
+    const { error } = await this.supabase.admin
+      .from('envelopes')
+      .update({ status: 'expired' })
+      .eq('id', envelope.id)
+      // Solo si nadie lo cambió entretanto: un sobre que se completó justo
+      // antes de la lectura no puede pasar a caducado.
+      .in('status', ['sent', 'in_progress']);
+
+    if (error) {
+      this.logger.error(`No se pudo marcar como caducado el sobre ${envelope.id}`);
+      return envelope;
+    }
+
+    await this.audit.record({
+      envelopeId: envelope.id,
+      actorType: 'system',
+      eventType: 'envelope.expired',
+      metadata: { expiresAt: envelope.expires_at },
+    });
+
+    return { ...envelope, status: 'expired' };
+  }
+
   async getBundle(envelopeId: string): Promise<EnvelopeBundle> {
     const { data: envelope, error } = await this.supabase.admin
       .from('envelopes')
@@ -519,6 +803,8 @@ export class EnvelopesService {
 
     if (error) throw error;
     if (!envelope) throw new NotFoundException('Sobre no encontrado');
+
+    const current = await this.applyExpiry(envelope as EnvelopeRow);
 
     const [{ data: signers }, { data: fields }] = await Promise.all([
       this.supabase.admin
@@ -530,7 +816,7 @@ export class EnvelopesService {
     ]);
 
     return {
-      envelope: envelope as EnvelopeRow,
+      envelope: current,
       signers: (signers ?? []) as EnvelopeSignerRow[],
       fields: (fields ?? []) as SignatureFieldRow[],
     };
@@ -560,6 +846,76 @@ export class EnvelopesService {
   }
 
   /** Crea un sobre con campos por defecto y lo envía de inmediato. */
+  /**
+   * Sobre de un solo firmante para que el emisor firme su propio documento.
+   *
+   * No emite enlace ni manda correo: el firmante es quien está haciendo la
+   * petición, ya autenticado. Todo lo demás —consentimiento, método, nivel,
+   * cadena de versiones, hoja de certificación— es idéntico al flujo normal,
+   * porque una firma propia necesita exactamente la misma prueba.
+   */
+  async createForSelfSign(
+    user: AuthUser,
+    documentId: string,
+    params: { documentType?: string; placements?: DetectedPlacementDto[]; ownerName: string },
+    request?: Request,
+  ): Promise<{ envelopeId: string; signerId: string }> {
+    const selfTempId = 'signer-self';
+
+    const document = await this.getOwnedDocument(user.id, documentId);
+    const originalBytes = await this.download(document.original_pdf_path);
+    const pdf = await PDFDocument.load(originalBytes);
+    const pageCount = pdf.getPageCount();
+    const { width, height } = pdf.getPage(pageCount - 1).getSize();
+
+    const ctx = {
+      invitedTempId: selfTempId,
+      ownerTempId: selfTempId,
+      includeSender: false,
+      pageCount,
+    };
+
+    const detected = params.placements?.length
+      ? this.fieldsFromPlacements(params.placements, ctx)
+      : [];
+
+    const bundle = await this.create(
+      user,
+      {
+        documentId,
+        mode: SigningModeDto.parallel,
+        documentType: params.documentType,
+        signers: [
+          {
+            tempId: selfTempId,
+            fullName: params.ownerName,
+            email: user.email.trim().toLowerCase(),
+            roleLabel: 'Emisor',
+          },
+        ],
+        fields: detected.length > 0 ? detected : blindFallbackFields({ ...ctx, width, height }),
+      },
+      request,
+    );
+
+    // Pasa a `sent` sin emitir token ni correo: el firmante ya está aquí.
+    await this.supabase.admin
+      .from('envelopes')
+      .update({ status: 'sent', sent_at: new Date().toISOString() })
+      .eq('id', bundle.envelope.id);
+
+    await this.audit.record({
+      envelopeId: bundle.envelope.id,
+      signerId: bundle.signers[0].id,
+      actorType: 'owner',
+      eventType: 'envelope.sent',
+      request,
+      metadata: { selfSign: true, fields: bundle.fields.length },
+    });
+
+    return { envelopeId: bundle.envelope.id, signerId: bundle.signers[0].id };
+  }
+
   async createAndSendForSignature(
     user: AuthUser,
     documentId: string,
@@ -569,6 +925,11 @@ export class EnvelopesService {
       includeSender?: boolean;
       ownerName?: string;
       ownerEmail?: string;
+      documentType?: string;
+      requiredLevel?: SignatureLevelDto;
+      placements?: DetectedPlacementDto[];
+      mode?: SigningModeDto;
+      senderSignsFirst?: boolean;
     },
     request?: Request,
   ) {
@@ -583,86 +944,60 @@ export class EnvelopesService {
     const lastPage = pdf.getPage(pageCount - 1);
     const { width, height } = lastPage.getSize();
 
-    const signers = [
-      {
-        tempId: invitedTempId,
-        fullName: email.split('@')[0],
-        email,
-        roleLabel: 'Firmante',
-      },
-    ];
+    const invited = {
+      tempId: invitedTempId,
+      fullName: email.split('@')[0],
+      email,
+      roleLabel: 'Firmante',
+    };
 
-    if (params.includeSender && params.ownerEmail) {
-      signers.push({
-        tempId: ownerTempId,
-        fullName: params.ownerName?.trim() || params.ownerEmail.split('@')[0],
-        email: params.ownerEmail,
-        roleLabel: 'Emisor',
-      });
-    }
+    const owner =
+      params.includeSender && params.ownerEmail
+        ? {
+            tempId: ownerTempId,
+            fullName: params.ownerName?.trim() || params.ownerEmail.split('@')[0],
+            email: params.ownerEmail,
+            roleLabel: 'Emisor',
+          }
+        : null;
 
-    const fields = [
-      {
-        signerTempId: invitedTempId,
-        page: pageCount,
-        x: 0.08,
-        y: params.includeSender ? 0.86 : 0.82,
-        w: 0.55,
-        h: 0.07,
-        type: FieldTypeDto.signature,
-        pageWidthPt: width,
-        pageHeightPt: height,
-        detectionSource: 'fallback' as const,
-      },
-      {
-        signerTempId: invitedTempId,
-        page: pageCount,
-        x: 0.66,
-        y: params.includeSender ? 0.86 : 0.82,
-        w: 0.24,
-        h: 0.05,
-        type: FieldTypeDto.date,
-        pageWidthPt: width,
-        pageHeightPt: height,
-        detectionSource: 'fallback' as const,
-      },
-    ];
+    // El orden de la lista es el orden de firma en modo secuencial, así que
+    // quién va primero tiene que poder decidirse: en un contrato laboral firma
+    // antes el empleador, en una aceptación de presupuesto antes el cliente.
+    const signers = !owner
+      ? [invited]
+      : params.senderSignsFirst
+        ? [owner, invited]
+        : [invited, owner];
 
-    if (params.includeSender) {
-      fields.push(
-        {
-          signerTempId: ownerTempId,
-          page: pageCount,
-          x: 0.08,
-          y: 0.74,
-          w: 0.55,
-          h: 0.07,
-          type: FieldTypeDto.signature,
-          pageWidthPt: width,
-          pageHeightPt: height,
-          detectionSource: 'fallback' as const,
-        },
-        {
-          signerTempId: ownerTempId,
-          page: pageCount,
-          x: 0.66,
-          y: 0.74,
-          w: 0.24,
-          h: 0.05,
-          type: FieldTypeDto.date,
-          pageWidthPt: width,
-          pageHeightPt: height,
-          detectionSource: 'fallback' as const,
-        },
-      );
-    }
+    // Con zonas detectadas se usan esas; sin ellas se cae a una posición fija
+    // al pie, que es la que puede tapar contenido. Por eso el cliente analiza
+    // el documento antes de enviar.
+    const ctx = {
+      invitedTempId,
+      ownerTempId,
+      includeSender: Boolean(params.includeSender),
+      pageCount,
+    };
+
+    const detected = params.placements?.length
+      ? this.fieldsFromPlacements(params.placements, ctx)
+      : [];
+
+    // Si el detector no dio nada usable —documento escaneado, o zonas que no
+    // cubren a todas las partes— se cae a la posición fija. Quedarse sin enviar
+    // sería peor que enviar con una caja que el emisor puede reubicar.
+    const fields =
+      detected.length > 0 ? detected : blindFallbackFields({ ...ctx, width, height });
 
     const bundle = await this.create(
       user,
       {
         documentId,
-        mode: SigningModeDto.parallel,
+        mode: params.mode ?? SigningModeDto.parallel,
         message: params.message,
+        documentType: params.documentType,
+        requiredLevel: params.requiredLevel,
         signers,
         fields,
       },
@@ -689,6 +1024,10 @@ export class EnvelopesService {
       sentAt: row.sent_at,
       completedAt: row.completed_at,
       createdAt: row.created_at,
+      documentType: row.document_type,
+      requiredLevel: row.required_level,
+      legalFramework: row.legal_framework,
+      consentText: row.consent_text,
     };
   }
 
@@ -702,6 +1041,15 @@ export class EnvelopesService {
       status: row.status,
       signedAt: row.signed_at,
       declineReason: row.decline_reason,
+      allowedMethods: row.allowed_methods,
+      requireRut: row.require_rut,
+      signatureMethod: row.signature_method,
+      signatureLevel: row.signature_level,
+      authMethod: row.auth_method,
+      // El RUT completo solo lo ve el dueño del sobre, que ya lo conoce por el
+      // contrato; el resto de las vistas lo enmascaran.
+      identityRut: row.identity_rut,
+      consentAcceptedAt: row.consent_accepted_at,
     };
   }
 
@@ -720,4 +1068,74 @@ export class EnvelopesService {
       detectionConfidence: row.detection_confidence,
     };
   }
+}
+
+/**
+ * Posición fija al pie, para cuando el documento no se pudo analizar.
+ *
+ * Es deliberadamente el último recurso: coloca la firma a ciegas y puede caer
+ * sobre el texto. Se conserva porque un escaneo sin capa de texto no ofrece
+ * nada mejor, y quedarse sin enviar es peor que enviar con una caja que el
+ * emisor puede reubicar.
+ */
+function blindFallbackFields(ctx: {
+  invitedTempId: string;
+  ownerTempId: string;
+  includeSender: boolean;
+  pageCount: number;
+  width: number;
+  height: number;
+}): FieldInputDto[] {
+  const base = {
+    page: ctx.pageCount,
+    pageWidthPt: ctx.width,
+    pageHeightPt: ctx.height,
+    detectionSource: 'fallback' as const,
+  };
+
+  const fields: FieldInputDto[] = [
+    {
+      ...base,
+      signerTempId: ctx.invitedTempId,
+      x: 0.08,
+      y: ctx.includeSender ? 0.86 : 0.82,
+      w: 0.31,
+      h: 0.058,
+      type: FieldTypeDto.signature,
+    },
+    {
+      ...base,
+      signerTempId: ctx.invitedTempId,
+      x: 0.66,
+      y: ctx.includeSender ? 0.86 : 0.82,
+      w: 0.24,
+      h: 0.05,
+      type: FieldTypeDto.date,
+    },
+  ];
+
+  if (ctx.includeSender) {
+    fields.push(
+      {
+        ...base,
+        signerTempId: ctx.ownerTempId,
+        x: 0.08,
+        y: 0.74,
+        w: 0.31,
+        h: 0.058,
+        type: FieldTypeDto.signature,
+      },
+      {
+        ...base,
+        signerTempId: ctx.ownerTempId,
+        x: 0.66,
+        y: 0.74,
+        w: 0.24,
+        h: 0.05,
+        type: FieldTypeDto.date,
+      },
+    );
+  }
+
+  return fields;
 }
