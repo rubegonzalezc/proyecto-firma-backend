@@ -9,16 +9,44 @@ import type { Request } from 'express';
 import { randomBytes, randomUUID } from 'crypto';
 import type { AuthUser } from '../../common/types/database.types';
 import type { DocumentRow, EnvelopeRow } from '../../common/types/database.types';
-import { sha256Hex } from '../../common/utils/hash';
 import { SupabaseService } from '../../infrastructure/supabase/supabase.service';
 import { DocumentAuditService } from '../audit/document-audit.service';
 import { AuthService } from '../auth/auth.service';
 import { EnvelopesService } from '../envelopes/envelopes.service';
-import { DocumentStampService } from '../signing/pdf/document-stamp.service';
-import type { SignDocumentDto } from './dto/document.dto';
+import { SigningService } from '../signing/signing.service';
+import type { SelfSignDto } from './dto/self-sign.dto';
 import type { SendForSignatureDto } from './dto/send-for-signature.dto';
 
 const MAX_PDF_BYTES = 20 * 1024 * 1024; // 20 MB
+
+/**
+ * Forma única de un documento en el listado.
+ *
+ * Se declara explícitamente porque `mapDocument` devuelve por tres ramas
+ * distintas —documento suelto, sobre en curso, sobre completado— y sin un tipo
+ * común TypeScript infería una unión en la que el avance de firma solo existía
+ * en algunas. El cliente consume una sola forma: el contrato debe serlo.
+ */
+export interface DocumentListItem {
+  id: string;
+  name: string;
+  /**
+   * `sent`, `in_progress` y `declined` no existen en la tabla: se derivan del
+   * sobre asociado. En `documents.status` solo hay `draft` y `signed`.
+   */
+  status: DocumentRow['status'] | 'sent' | 'in_progress' | 'declined';
+  signerName: string | null;
+  signerEmail: string | null;
+  verificationCode: string | null;
+  signedSha256: string | null;
+  createdAt: string;
+  signedAt: string | null;
+  /** Avance de firma. Ausente en documentos que no tienen sobre. */
+  signedCount?: number;
+  totalSigners?: number;
+  signedNames?: string[];
+  pendingNames?: string[];
+}
 
 @Injectable()
 export class DocumentsService {
@@ -26,8 +54,8 @@ export class DocumentsService {
     private readonly supabase: SupabaseService,
     private readonly documentAudit: DocumentAuditService,
     private readonly authService: AuthService,
-    private readonly documentStamp: DocumentStampService,
     private readonly envelopes: EnvelopesService,
+    private readonly signing: SigningService,
     private readonly config: ConfigService,
   ) {}
 
@@ -50,7 +78,7 @@ export class DocumentsService {
       completed_at: string | null;
       signers: Array<{ full_name: string; email: string; status: string }>;
     },
-  ) {
+  ): DocumentListItem {
     if ((row.status === 'signed' && row.signed_pdf_path) || !envelope) {
       return {
         id: row.id,
@@ -70,10 +98,19 @@ export class DocumentsService {
     );
     const signedSigners = envelope.signers.filter((s) => s.status === 'signed');
 
+    // El avance de firma se expone siempre. Sin esto, cuando una de las partes
+    // firma no cambia nada visible en la lista: el documento sigue «enviado»
+    // hasta que firman todas, y la única señal era que el nombre de quien firmó
+    // desaparecía en silencio de la columna de contacto.
+    const progress = {
+      signedCount: signedSigners.length,
+      totalSigners: envelope.signers.length,
+      signedNames: signedSigners.map((s) => s.full_name?.trim() || s.email),
+      pendingNames: pendingSigners.map((s) => s.full_name?.trim() || s.email),
+    };
+
     if (envelope.status === 'completed') {
-      const signedBy = signedSigners
-        .map((s) => s.full_name?.trim() || s.email)
-        .join(', ');
+      const signedBy = progress.signedNames.join(', ');
       return {
         id: row.id,
         name: row.name,
@@ -84,23 +121,32 @@ export class DocumentsService {
         signedSha256: row.signed_sha256,
         createdAt: row.created_at,
         signedAt: envelope.completed_at ?? row.signed_at,
+        ...progress,
       };
     }
 
     if (['sent', 'in_progress', 'declined'].includes(envelope.status)) {
-      const sentTo = pendingSigners
-        .map((s) => s.full_name?.trim() || s.email)
-        .join(', ');
+      // Se distinguen los tres. Antes se colapsaban en «enviado para firma»,
+      // que mentía dos veces: un sobre con firmas ya recogidas parecía que no
+      // había empezado, y uno rechazado parecía seguir esperando.
+      const derived =
+        envelope.status === 'declined'
+          ? ('declined' as const)
+          : envelope.status === 'in_progress'
+            ? ('in_progress' as const)
+            : ('sent' as const);
+
       return {
         id: row.id,
         name: row.name,
-        status: 'sent' as const,
-        signerName: sentTo || null,
+        status: derived,
+        signerName: progress.pendingNames.join(', ') || null,
         signerEmail: pendingSigners[0]?.email ?? null,
         verificationCode: row.verification_code,
         signedSha256: row.signed_sha256,
         createdAt: row.created_at,
         signedAt: envelope.sent_at ?? row.signed_at,
+        ...progress,
       };
     }
 
@@ -276,83 +322,74 @@ export class DocumentsService {
     return this.mapDocument(data as DocumentRow);
   }
 
-  async stampSign(user: AuthUser, id: string, request?: Request) {
+  /**
+   * Autofirma: el emisor firma su propio documento.
+   *
+   * Pasa por el mismo flujo de sobres que una firma externa en vez de tener su
+   * propio camino. El camino aparte era el problema: se saltaba el
+   * consentimiento, el método, el RUT, el nivel legal, la cadena de versiones y
+   * la colocación detectada, y producía una firma que parecía igual que las
+   * demás siendo mucho más débil. Justamente la que la contraparte impugna.
+   */
+  async selfSign(user: AuthUser, id: string, dto: SelfSignDto, request?: Request) {
     const doc = await this.getOwnedDocument(user.id, id);
 
     if (doc.status === 'signed') {
       throw new BadRequestException('El documento ya está firmado');
     }
 
-    const profile = await this.authService.getProfile(user);
-    const displayName = profile.full_name?.trim() || user.email;
-    const signerEmail = user.email.trim().toLowerCase();
+    const { data: activeEnvelope } = await this.supabase.admin
+      .from('envelopes')
+      .select('id')
+      .eq('document_id', id)
+      .eq('user_id', user.id)
+      .in('status', ['sent', 'in_progress'])
+      .maybeSingle();
 
-    const { data: originalFile, error: downloadError } = await this.supabase.admin.storage
-      .from(this.supabase.documentsBucket)
-      .download(doc.original_pdf_path);
-
-    if (downloadError || !originalFile) {
-      throw new NotFoundException('No se pudo leer el documento original');
+    if (activeEnvelope) {
+      throw new BadRequestException('Este documento ya fue enviado para firma.');
     }
 
-    const originalBytes = Buffer.from(await originalFile.arrayBuffer());
-    const verificationCode = doc.verification_code ?? this.generateVerificationCode();
-    const signedAt = new Date();
-    const verifyBaseUrl = (this.config.get<string>('app.verifyBaseUrl') ?? '').replace(/\/$/, '');
-    const verifyUrl = `${verifyBaseUrl}/verify/${verificationCode}`;
+    const profile = await this.authService.getProfile(user);
+    const displayName = profile.full_name?.trim() || user.email;
 
-    const stampedBytes = await this.documentStamp.stamp(originalBytes, {
-      displayName,
-      email: signerEmail,
-      verificationCode,
-      signedAt,
-      verifyUrl,
+    const { envelopeId, signerId } = await this.envelopes.createForSelfSign(
+      user,
+      id,
+      {
+        documentType: dto.documentType,
+        placements: dto.placements,
+        ownerName: displayName,
+      },
+      request,
+    );
+
+    await this.signing.submitSignature({
+      envelopeId,
+      signerId,
+      fullName: displayName,
+      submission: {
+        method: dto.method,
+        consentAccepted: dto.consentAccepted,
+        // Sesión autenticada con la cuenta: la identidad ya está comprobada.
+        authMethod: 'account_password',
+        signatureImageBase64: dto.signatureImageBase64,
+        typedName: dto.typedName,
+        typedStyle: dto.typedStyle,
+        rut: dto.rut,
+      },
+      request,
     });
 
-    const signedPath = this.storagePath(user.id, id, 'signed.pdf');
-    const signedSha256 = sha256Hex(stampedBytes);
-
-    const { error: uploadError } = await this.supabase.admin.storage
-      .from(this.supabase.documentsBucket)
-      .upload(signedPath, stampedBytes, {
-        contentType: 'application/pdf',
-        upsert: true,
-      });
-
-    if (uploadError) throw uploadError;
-
+    // `submitSignature` sincroniza la fila del documento al cerrar el sobre.
     const { data, error } = await this.supabase.admin
       .from('documents')
-      .update({
-        status: 'signed',
-        signed_pdf_path: signedPath,
-        signer_name: displayName,
-        signer_email: signerEmail,
-        verification_code: verificationCode,
-        signed_at: signedAt.toISOString(),
-        signed_sha256: signedSha256,
-      })
+      .select('*')
       .eq('id', id)
       .eq('user_id', user.id)
-      .select('*')
       .single();
 
     if (error) throw error;
-
-    await this.documentAudit.record({
-      documentId: id,
-      userId: user.id,
-      eventType: 'document.signed',
-      request,
-      metadata: {
-        signerName: displayName,
-        signerEmail,
-        verificationCode,
-        signedSha256,
-        method: 'stamp',
-      },
-    });
-
     return this.mapDocument(data as DocumentRow);
   }
 
@@ -394,75 +431,15 @@ export class DocumentsService {
         signerEmail: email,
         message: dto.message,
         includeSender: dto.includeSender ?? false,
+        documentType: dto.documentType,
+        placements: dto.placements,
+        mode: dto.mode,
+        senderSignsFirst: dto.senderSignsFirst,
         ownerName,
         ownerEmail: user.email.trim().toLowerCase(),
       },
       request,
     );
-  }
-
-  async sign(user: AuthUser, id: string, dto: SignDocumentDto, request?: Request) {
-    const doc = await this.getOwnedDocument(user.id, id);
-
-    if (doc.status === 'signed') {
-      throw new BadRequestException('El documento ya está firmado');
-    }
-
-    const pdfBuffer = Buffer.from(dto.signedPdfBase64, 'base64');
-    if (pdfBuffer.length === 0 || pdfBuffer.length > MAX_PDF_BYTES) {
-      throw new BadRequestException('PDF firmado inválido');
-    }
-
-    if (pdfBuffer.subarray(0, 4).toString() !== '%PDF') {
-      throw new BadRequestException('El archivo firmado no es un PDF válido');
-    }
-
-    const verificationCode = doc.verification_code ?? this.generateVerificationCode();
-    const signedPath = this.storagePath(user.id, id, 'signed.pdf');
-    const signedAt = new Date().toISOString();
-    const signedSha256 = sha256Hex(pdfBuffer);
-
-    const { error: uploadError } = await this.supabase.admin.storage
-      .from(this.supabase.documentsBucket)
-      .upload(signedPath, pdfBuffer, {
-        contentType: 'application/pdf',
-        upsert: true,
-      });
-
-    if (uploadError) throw uploadError;
-
-    const { data, error } = await this.supabase.admin
-      .from('documents')
-      .update({
-        status: 'signed',
-        signed_pdf_path: signedPath,
-        signer_name: dto.signerName.trim(),
-        signer_email: dto.signerEmail.trim().toLowerCase(),
-        verification_code: verificationCode,
-        signed_at: signedAt,
-        signed_sha256: signedSha256,
-      })
-      .eq('id', id)
-      .eq('user_id', user.id)
-      .select('*')
-      .single();
-
-    if (error) throw error;
-
-    await this.documentAudit.record({
-      documentId: id,
-      userId: user.id,
-      eventType: 'document.signed',
-      request,
-      metadata: {
-        signerName: dto.signerName.trim(),
-        signerEmail: dto.signerEmail.trim().toLowerCase(),
-        verificationCode,
-        signedSha256,
-      },
-    });
-
-    return this.mapDocument(data as DocumentRow);
   }
 
   async getDownloadUrl(

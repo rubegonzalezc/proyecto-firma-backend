@@ -7,6 +7,7 @@ export type AuditEventType =
   | 'envelope.sent'
   | 'envelope.voided'
   | 'envelope.completed'
+  | 'envelope.expired'
   | 'envelope.downloaded'
   | 'signer.invited'
   | 'signer.link_opened'
@@ -26,6 +27,20 @@ export interface AuditInput {
   metadata?: Record<string, unknown>;
   sha256Before?: string | null;
   sha256After?: string | null;
+}
+
+export interface AuditEventView {
+  id: string;
+  signerId: string | null;
+  actorType: string;
+  eventType: string;
+  ip: string | null;
+  userAgent: string | null;
+  metadata: Record<string, unknown> | null;
+  /** Hash del documento antes y después del evento, cuando lo cambió. */
+  sha256Before: string | null;
+  sha256After: string | null;
+  createdAt: string;
 }
 
 @Injectable()
@@ -70,7 +85,14 @@ export class AuditService {
     }
   }
 
-  async listForEnvelope(envelopeId: string) {
+  /**
+   * Traza del sobre, mapeada.
+   *
+   * Antes devolvía las filas crudas de la tabla: el cliente tenía que conocer
+   * los nombres de columna de la base de datos, y cualquier cambio de esquema
+   * le llegaba directo. El resto de la API mapea; esta también.
+   */
+  async listForEnvelope(envelopeId: string): Promise<AuditEventView[]> {
     const { data, error } = await this.supabase.admin
       .from('audit_events')
       .select('*')
@@ -78,6 +100,18 @@ export class AuditService {
       .order('created_at', { ascending: true });
 
     if (error) throw error;
-    return data ?? [];
+
+    return (data ?? []).map((row: Record<string, unknown>) => ({
+      id: row.id as string,
+      signerId: (row.signer_id as string | null) ?? null,
+      actorType: row.actor_type as string,
+      eventType: row.event_type as string,
+      ip: (row.ip as string | null) ?? null,
+      userAgent: (row.user_agent as string | null) ?? null,
+      metadata: (row.metadata as Record<string, unknown> | null) ?? null,
+      sha256Before: (row.sha256_before as string | null) ?? null,
+      sha256After: (row.sha256_after as string | null) ?? null,
+      createdAt: row.created_at as string,
+    }));
   }
 }

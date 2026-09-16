@@ -62,6 +62,12 @@ export type SignerStatus =
 
 export type FieldType = 'signature' | 'initials' | 'name' | 'rut' | 'date' | 'text';
 
+export type SignatureLevelValue = 'fes' | 'fes_verificada' | 'fea' | 'notarial' | 'no_electronica';
+
+export type SignatureMethodValue = 'draw' | 'type' | 'upload' | 'click' | 'certificate';
+
+export type SignerAuthMethodValue = 'link_only' | 'email_otp' | 'account_password';
+
 export interface EnvelopeRow {
   id: string;
   user_id: string;
@@ -83,6 +89,10 @@ export interface EnvelopeRow {
   completed_at: string | null;
   created_at: string;
   updated_at: string;
+  document_type: string;
+  required_level: SignatureLevelValue;
+  legal_framework: string;
+  consent_text: string | null;
 }
 
 export interface EnvelopeSignerRow {
@@ -99,6 +109,15 @@ export interface EnvelopeSignerRow {
   signed_ip: string | null;
   signed_user_agent: string | null;
   created_at: string;
+  allowed_methods: SignatureMethodValue[];
+  signature_method: SignatureMethodValue | null;
+  signature_level: SignatureLevelValue | null;
+  auth_method: SignerAuthMethodValue | null;
+  signature_image_path: string | null;
+  require_rut: boolean;
+  identity_rut: string | null;
+  consent_accepted_at: string | null;
+  consent_sha256: string | null;
 }
 
 export interface SignatureFieldRow {
@@ -157,6 +176,9 @@ export interface EnvelopeVerificationRow {
   verification_code: string;
   document_name: string;
   mode: SigningMode;
+  document_type: string;
+  required_level: SignatureLevelValue;
+  legal_framework: string;
   completed_at: string | null;
   final_pdf_path: string | null;
   final_sha256: string | null;
@@ -166,5 +188,10 @@ export interface EnvelopeVerificationRow {
     role: string | null;
     order: number;
     signedAt: string | null;
+    method: SignatureMethodValue | null;
+    level: SignatureLevelValue | null;
+    authMethod: SignerAuthMethodValue | null;
+    rut: string | null;
+    consentAcceptedAt: string | null;
   }> | null;
 }

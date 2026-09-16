@@ -25,7 +25,7 @@ import { memoryStorage } from 'multer';
 import { CurrentUser } from '../../common/decorators/auth.decorators';
 import type { AuthUser } from '../../common/types/database.types';
 import { DocumentsService } from './documents.service';
-import { SignDocumentDto } from './dto/document.dto';
+import { SelfSignDto } from './dto/self-sign.dto';
 import { SendForSignatureDto } from './dto/send-for-signature.dto';
 
 @ApiTags('documents')
@@ -87,14 +87,17 @@ export class DocumentsController {
     return this.documentsService.create(user, file, request);
   }
 
-  @Post(':id/stamp-sign')
-  @ApiOperation({ summary: 'Firmar documento con estampado del nombre del perfil autenticado' })
-  stampSign(
+  @Post(':id/self-sign')
+  @ApiOperation({
+    summary: 'Firmar tu propio documento, con el mismo consentimiento y método que un firmante externo',
+  })
+  selfSign(
     @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SelfSignDto,
     @Req() request: Request,
   ) {
-    return this.documentsService.stampSign(user, id, request);
+    return this.documentsService.selfSign(user, id, dto, request);
   }
 
   @Post(':id/send-for-signature')
@@ -106,17 +109,6 @@ export class DocumentsController {
     @Req() request: Request,
   ) {
     return this.documentsService.sendForSignature(user, id, dto, request);
-  }
-
-  @Post(':id/sign')
-  @ApiOperation({ summary: 'Registrar firma y PDF firmado (legacy)' })
-  sign(
-    @CurrentUser() user: AuthUser,
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: SignDocumentDto,
-    @Req() request: Request,
-  ) {
-    return this.documentsService.sign(user, id, dto, request);
   }
 
   @Get(':id/download')
