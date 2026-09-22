@@ -5,6 +5,7 @@ import { ConfigService } from '@nestjs/config';
 import { DocumentAuditService } from '../audit/document-audit.service';
 import { AuthService } from '../auth/auth.service';
 import { EnvelopesService } from '../envelopes/envelopes.service';
+import { FoldersService } from '../folders/folders.service';
 import { SigningService } from '../signing/signing.service';
 import { LegalService } from '../legal/legal.service';
 import { VerificationService } from '../verification/verification.service';
@@ -64,6 +65,7 @@ describe('DocumentsService sign → verify', () => {
         { provide: SupabaseService, useValue: fake.asService() },
         { provide: AuthService, useValue: { getProfile: async () => ({ full_name: 'Titular' }) } },
         { provide: EnvelopesService, useValue: envelopes },
+        { provide: FoldersService, useValue: { assertOwnedFolder: async () => ({ id: 'folder-1', name: 'Legal', user_id: user.id, created_at: '', updated_at: '' }) } },
         { provide: SigningService, useValue: signing },
         { provide: ConfigService, useValue: { get: () => 'https://app.example.cl' } },
       ],

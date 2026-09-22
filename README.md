@@ -77,6 +77,7 @@ supabase/migrations/009_better_auth_user_ids_text.sql
 supabase/migrations/010_envelopes_better_auth_user_id.sql
 supabase/migrations/011_user_notifications.sql
 supabase/migrations/012_signature_methods.sql
+supabase/migrations/013_user_folders.sql
 ```
 
 > La `003` es solo un guion de referencia histórico y no se ejecuta.

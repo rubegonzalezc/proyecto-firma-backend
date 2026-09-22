@@ -15,6 +15,7 @@ import { SignerAccessModule } from './modules/signer-access/signer-access.module
 import { SigningModule } from './modules/signing/signing.module';
 import { SigningPortalModule } from './modules/signing-portal/signing-portal.module';
 import { VerificationModule } from './modules/verification/verification.module';
+import { FoldersModule } from './modules/folders/folders.module';
 import { HealthModule } from './modules/health/health.module';
 import { LegalModule } from './modules/legal/legal.module';
 import { MailModule } from './modules/mail/mail.module';
@@ -47,6 +48,7 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
     VerificationModule,
     NotificationsModule,
     LegalModule,
+    FoldersModule,
     HealthModule,
   ],
   providers: [
