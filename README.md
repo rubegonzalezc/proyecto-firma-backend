@@ -124,13 +124,18 @@ recibe por correo más un código de un solo uso.
 | Método | Ruta | Descripción |
 |--------|------|-------------|
 | GET | `/api/v1/auth/me` | Perfil del usuario |
-| GET | `/api/v1/documents` | Listar documentos |
-| POST | `/api/v1/documents` | Subir PDF (`multipart/form-data`) |
+| GET | `/api/v1/documents` | Listar documentos (`?folderId=` o `none` para sin carpeta) |
+| POST | `/api/v1/documents` | Subir PDF (`multipart/form-data`, campo opcional `folderId`) |
+| PATCH | `/api/v1/documents/:id/folder` | Mover documento a carpeta o raíz |
 | GET | `/api/v1/documents/:id` | Detalle |
 | POST | `/api/v1/documents/:id/sign` | **Obsoleto**: acepta el PDF ya firmado sin validarlo |
 | POST | `/api/v1/documents/:id/self-sign` | Firmar tu propio documento (mismo flujo que un firmante externo) |
 | GET | `/api/v1/documents/:id/download` | URL firmada de descarga |
 | DELETE | `/api/v1/documents/:id` | Eliminar documento |
+| GET | `/api/v1/folders` | Listar carpetas del usuario |
+| POST | `/api/v1/folders` | Crear carpeta |
+| PATCH | `/api/v1/folders/:id` | Renombrar carpeta |
+| DELETE | `/api/v1/folders/:id` | Eliminar carpeta (documentos pasan a raíz) |
 | POST | `/api/v1/envelopes` | Crear sobre con firmantes y campos |
 | GET | `/api/v1/envelopes` | Listar sobres |
 | GET | `/api/v1/envelopes/:id` | Detalle con firmantes y campos |
