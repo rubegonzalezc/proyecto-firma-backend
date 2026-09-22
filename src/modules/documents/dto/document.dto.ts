@@ -7,6 +7,12 @@ export class DocumentResponseDto {
   @ApiProperty()
   name!: string;
 
+  @ApiPropertyOptional({ nullable: true })
+  folderId?: string | null;
+
+  @ApiPropertyOptional({ nullable: true })
+  folderName?: string | null;
+
   @ApiProperty({ enum: ['draft', 'signed'] })
   status!: string;
 

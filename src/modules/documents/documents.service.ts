@@ -13,6 +13,7 @@ import { SupabaseService } from '../../infrastructure/supabase/supabase.service'
 import { DocumentAuditService } from '../audit/document-audit.service';
 import { AuthService } from '../auth/auth.service';
 import { EnvelopesService } from '../envelopes/envelopes.service';
+import { FoldersService } from '../folders/folders.service';
 import { SigningService } from '../signing/signing.service';
 import type { SelfSignDto } from './dto/self-sign.dto';
 import type { SendForSignatureDto } from './dto/send-for-signature.dto';
@@ -30,6 +31,8 @@ const MAX_PDF_BYTES = 20 * 1024 * 1024; // 20 MB
 export interface DocumentListItem {
   id: string;
   name: string;
+  folderId: string | null;
+  folderName: string | null;
   /**
    * `sent`, `in_progress` y `declined` no existen en la tabla: se derivan del
    * sobre asociado. En `documents.status` solo hay `draft` y `signed`.
@@ -55,6 +58,7 @@ export class DocumentsService {
     private readonly documentAudit: DocumentAuditService,
     private readonly authService: AuthService,
     private readonly envelopes: EnvelopesService,
+    private readonly folders: FoldersService,
     private readonly signing: SigningService,
     private readonly config: ConfigService,
   ) {}
@@ -78,11 +82,18 @@ export class DocumentsService {
       completed_at: string | null;
       signers: Array<{ full_name: string; email: string; status: string }>;
     },
+    folder?: { id: string; name: string } | null,
   ): DocumentListItem {
+    const folderFields = {
+      folderId: row.folder_id ?? null,
+      folderName: folder?.name ?? null,
+    };
+
     if ((row.status === 'signed' && row.signed_pdf_path) || !envelope) {
       return {
         id: row.id,
         name: row.name,
+        ...folderFields,
         status: row.status,
         signerName: row.signer_name,
         signerEmail: row.signer_email,
@@ -114,6 +125,7 @@ export class DocumentsService {
       return {
         id: row.id,
         name: row.name,
+        ...folderFields,
         status: 'signed' as const,
         signerName: signedBy || row.signer_name,
         signerEmail: signedSigners[0]?.email ?? row.signer_email,
@@ -139,6 +151,7 @@ export class DocumentsService {
       return {
         id: row.id,
         name: row.name,
+        ...folderFields,
         status: derived,
         signerName: progress.pendingNames.join(', ') || null,
         signerEmail: pendingSigners[0]?.email ?? null,
@@ -153,6 +166,7 @@ export class DocumentsService {
     return {
       id: row.id,
       name: row.name,
+      ...folderFields,
       status: row.status,
       signerName: row.signer_name,
       signerEmail: row.signer_email,
@@ -163,12 +177,20 @@ export class DocumentsService {
     };
   }
 
-  async findAll(user: AuthUser) {
-    const { data, error } = await this.supabase.admin
+  async findAll(user: AuthUser, folderId?: string) {
+    let query = this.supabase.admin
       .from('documents')
       .select('*')
-      .eq('user_id', user.id)
-      .order('created_at', { ascending: false });
+      .eq('user_id', user.id);
+
+    if (folderId === 'none') {
+      query = query.is('folder_id', null);
+    } else if (folderId) {
+      await this.folders.assertOwnedFolder(user.id, folderId);
+      query = query.eq('folder_id', folderId);
+    }
+
+    const { data, error } = await query.order('created_at', { ascending: false });
 
     if (error) throw error;
     const rows = (data as DocumentRow[]) ?? [];
@@ -184,6 +206,26 @@ export class DocumentsService {
       .order('sent_at', { ascending: false });
 
     if (envelopesError) throw envelopesError;
+
+    const folderIds = [...new Set(rows.map((row) => row.folder_id).filter(Boolean))] as string[];
+    const folderById = new Map<string, { id: string; name: string }>();
+
+    if (folderIds.length > 0) {
+      const { data: folderRows, error: foldersError } = await this.supabase.admin
+        .from('folders')
+        .select('id, name')
+        .eq('user_id', user.id)
+        .in('id', folderIds);
+
+      if (foldersError) throw foldersError;
+
+      for (const folder of folderRows ?? []) {
+        folderById.set(folder.id as string, {
+          id: folder.id as string,
+          name: folder.name as string,
+        });
+      }
+    }
 
     const envelopeByDocument = new Map<
       string,
@@ -210,7 +252,13 @@ export class DocumentsService {
       });
     }
 
-    return rows.map((row) => this.mapDocument(row, envelopeByDocument.get(row.id)));
+    return rows.map((row) =>
+      this.mapDocument(
+        row,
+        envelopeByDocument.get(row.id),
+        row.folder_id ? folderById.get(row.folder_id) ?? null : null,
+      ),
+    );
   }
 
   findInbox(user: AuthUser) {
@@ -271,10 +319,18 @@ export class DocumentsService {
 
   async findOne(user: AuthUser, id: string) {
     const doc = await this.getOwnedDocument(user.id, id);
-    return this.mapDocument(doc);
+    const folder = doc.folder_id
+      ? await this.loadFolderName(user.id, doc.folder_id)
+      : null;
+    return this.mapDocument(doc, undefined, folder);
   }
 
-  async create(user: AuthUser, file: Express.Multer.File, request?: Request) {
+  async create(
+    user: AuthUser,
+    file: Express.Multer.File,
+    request?: Request,
+    folderId?: string,
+  ) {
     if (!file) throw new BadRequestException('Archivo PDF requerido');
     if (file.mimetype !== 'application/pdf') {
       throw new BadRequestException('Solo se permiten archivos PDF');
@@ -286,6 +342,14 @@ export class DocumentsService {
     const documentId = randomUUID();
     const path = this.storagePath(user.id, documentId, 'original.pdf');
     const verificationCode = this.generateVerificationCode();
+
+    let resolvedFolderId: string | null = null;
+    let folder: { id: string; name: string } | null = null;
+    if (folderId) {
+      const owned = await this.folders.assertOwnedFolder(user.id, folderId);
+      resolvedFolderId = owned.id;
+      folder = { id: owned.id, name: owned.name };
+    }
 
     const { error: uploadError } = await this.supabase.admin.storage
       .from(this.supabase.documentsBucket)
@@ -301,6 +365,7 @@ export class DocumentsService {
       .insert({
         id: documentId,
         user_id: user.id,
+        folder_id: resolvedFolderId,
         name: file.originalname,
         original_pdf_path: path,
         status: 'draft',
@@ -316,10 +381,31 @@ export class DocumentsService {
       userId: user.id,
       eventType: 'document.created',
       request,
-      metadata: { name: file.originalname, size: file.size },
+      metadata: { name: file.originalname, size: file.size, folderId: resolvedFolderId },
     });
 
-    return this.mapDocument(data as DocumentRow);
+    return this.mapDocument(data as DocumentRow, undefined, folder);
+  }
+
+  async moveToFolder(user: AuthUser, id: string, folderId: string | null) {
+    await this.getOwnedDocument(user.id, id);
+
+    let folder: { id: string; name: string } | null = null;
+    if (folderId) {
+      const owned = await this.folders.assertOwnedFolder(user.id, folderId);
+      folder = { id: owned.id, name: owned.name };
+    }
+
+    const { data, error } = await this.supabase.admin
+      .from('documents')
+      .update({ folder_id: folderId })
+      .eq('id', id)
+      .eq('user_id', user.id)
+      .select('*')
+      .single();
+
+    if (error) throw error;
+    return this.mapDocument(data as DocumentRow, undefined, folder);
   }
 
   /**
@@ -580,6 +666,22 @@ export class DocumentsService {
       .eq('user_id', userId);
 
     return signedPath;
+  }
+
+  private async loadFolderName(
+    userId: string,
+    folderId: string,
+  ): Promise<{ id: string; name: string } | null> {
+    const { data, error } = await this.supabase.admin
+      .from('folders')
+      .select('id, name')
+      .eq('id', folderId)
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!data) return null;
+    return { id: data.id as string, name: data.name as string };
   }
 
   private async getOwnedDocument(userId: string, id: string): Promise<DocumentRow> {

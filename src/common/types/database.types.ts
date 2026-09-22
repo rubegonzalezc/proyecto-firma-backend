@@ -8,9 +8,18 @@ export interface Profile {
   updated_at: string;
 }
 
+export interface FolderRow {
+  id: string;
+  user_id: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface DocumentRow {
   id: string;
   user_id: string;
+  folder_id: string | null;
   name: string;
   original_pdf_path: string;
   signed_pdf_path: string | null;

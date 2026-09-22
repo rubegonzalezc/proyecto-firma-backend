@@ -6,6 +6,7 @@ import {
   ParseUUIDPipe,
   Post,
   Body,
+  Patch,
   UploadedFile,
   UseInterceptors,
   Query,
@@ -27,6 +28,7 @@ import type { AuthUser } from '../../common/types/database.types';
 import { DocumentsService } from './documents.service';
 import { SelfSignDto } from './dto/self-sign.dto';
 import { SendForSignatureDto } from './dto/send-for-signature.dto';
+import { MoveDocumentDto } from '../folders/dto/folder.dto';
 
 @ApiTags('documents')
 @ApiBearerAuth()
@@ -36,8 +38,16 @@ export class DocumentsController {
 
   @Get()
   @ApiOperation({ summary: 'Listar documentos del usuario' })
-  findAll(@CurrentUser() user: AuthUser) {
-    return this.documentsService.findAll(user);
+  @ApiQuery({
+    name: 'folderId',
+    required: false,
+    description: 'Filtrar por carpeta; use "none" para documentos sin carpeta',
+  })
+  findAll(
+    @CurrentUser() user: AuthUser,
+    @Query('folderId') folderId?: string,
+  ) {
+    return this.documentsService.findAll(user, folderId);
   }
 
   @Get('inbox')
@@ -70,7 +80,10 @@ export class DocumentsController {
   @ApiBody({
     schema: {
       type: 'object',
-      properties: { file: { type: 'string', format: 'binary' } },
+      properties: {
+        file: { type: 'string', format: 'binary' },
+        folderId: { type: 'string', format: 'uuid' },
+      },
     },
   })
   @UseInterceptors(
@@ -82,9 +95,20 @@ export class DocumentsController {
   create(
     @CurrentUser() user: AuthUser,
     @UploadedFile() file: Express.Multer.File,
+    @Body('folderId') folderId: string | undefined,
     @Req() request: Request,
   ) {
-    return this.documentsService.create(user, file, request);
+    return this.documentsService.create(user, file, request, folderId);
+  }
+
+  @Patch(':id/folder')
+  @ApiOperation({ summary: 'Mover documento a otra carpeta o a la raíz' })
+  moveToFolder(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: MoveDocumentDto,
+  ) {
+    return this.documentsService.moveToFolder(user, id, dto.folderId ?? null);
   }
 
   @Post(':id/self-sign')
