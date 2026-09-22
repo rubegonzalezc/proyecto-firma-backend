@@ -46,7 +46,7 @@ describe('CertificateService', () => {
     expect(doc.getPage(0).getSize()).toEqual({ width: 612, height: 792 });
   });
 
-  it('produce un PDF válido con muchos firmantes sin desbordar', async () => {
+  it('continúa en páginas nuevas en vez de dejar firmantes fuera', async () => {
     const many = {
       ...baseData,
       signers: Array.from({ length: 12 }, (_, i) => ({
@@ -58,8 +58,10 @@ describe('CertificateService', () => {
       })),
     };
 
+    // La versión anterior cortaba la lista al quedarse sin sitio: un sobre de
+    // doce partes certificaba a cuatro y nadie se enteraba.
     const doc = await PDFDocument.load(await service.append(await contract(), many));
-    expect(doc.getPageCount()).toBe(2);
+    expect(doc.getPageCount()).toBeGreaterThan(2);
   });
 
   it('funciona sin hash final, cuando el sobre aún no se ha cerrado', async () => {

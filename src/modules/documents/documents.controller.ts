@@ -6,6 +6,7 @@ import {
   ParseUUIDPipe,
   Post,
   Body,
+  Patch,
   UploadedFile,
   UseInterceptors,
   Query,
@@ -25,7 +26,9 @@ import { memoryStorage } from 'multer';
 import { CurrentUser } from '../../common/decorators/auth.decorators';
 import type { AuthUser } from '../../common/types/database.types';
 import { DocumentsService } from './documents.service';
-import { SignDocumentDto } from './dto/document.dto';
+import { SelfSignDto } from './dto/self-sign.dto';
+import { SendForSignatureDto } from './dto/send-for-signature.dto';
+import { MoveDocumentDto } from '../folders/dto/folder.dto';
 
 @ApiTags('documents')
 @ApiBearerAuth()
@@ -35,8 +38,34 @@ export class DocumentsController {
 
   @Get()
   @ApiOperation({ summary: 'Listar documentos del usuario' })
-  findAll(@CurrentUser() user: AuthUser) {
-    return this.documentsService.findAll(user);
+  @ApiQuery({
+    name: 'folderId',
+    required: false,
+    description: 'Filtrar por carpeta; use "none" para documentos sin carpeta',
+  })
+  findAll(
+    @CurrentUser() user: AuthUser,
+    @Query('folderId') folderId?: string,
+  ) {
+    return this.documentsService.findAll(user, folderId);
+  }
+
+  @Get('inbox')
+  @ApiOperation({ summary: 'Listar documentos enviados al usuario para firmar' })
+  findInbox(@CurrentUser() user: AuthUser) {
+    return this.documentsService.findInbox(user);
+  }
+
+  @Get('inbox/:signerId/download')
+  @ApiOperation({ summary: 'Descargar PDF de una invitación de firma' })
+  @ApiQuery({ name: 'type', enum: ['original', 'signed'], required: false })
+  downloadInbox(
+    @CurrentUser() user: AuthUser,
+    @Param('signerId', ParseUUIDPipe) signerId: string,
+    @Query('type') type: 'original' | 'signed' = 'signed',
+    @Req() request: Request,
+  ) {
+    return this.documentsService.getInboxDownloadUrl(user, signerId, type, request);
   }
 
   @Get(':id')
@@ -51,7 +80,10 @@ export class DocumentsController {
   @ApiBody({
     schema: {
       type: 'object',
-      properties: { file: { type: 'string', format: 'binary' } },
+      properties: {
+        file: { type: 'string', format: 'binary' },
+        folderId: { type: 'string', format: 'uuid' },
+      },
     },
   })
   @UseInterceptors(
@@ -63,20 +95,44 @@ export class DocumentsController {
   create(
     @CurrentUser() user: AuthUser,
     @UploadedFile() file: Express.Multer.File,
+    @Body('folderId') folderId: string | undefined,
     @Req() request: Request,
   ) {
-    return this.documentsService.create(user, file, request);
+    return this.documentsService.create(user, file, request, folderId);
   }
 
-  @Post(':id/sign')
-  @ApiOperation({ summary: 'Registrar firma y PDF firmado' })
-  sign(
+  @Patch(':id/folder')
+  @ApiOperation({ summary: 'Mover documento a otra carpeta o a la raíz' })
+  moveToFolder(
     @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: SignDocumentDto,
+    @Body() dto: MoveDocumentDto,
+  ) {
+    return this.documentsService.moveToFolder(user, id, dto.folderId ?? null);
+  }
+
+  @Post(':id/self-sign')
+  @ApiOperation({
+    summary: 'Firmar tu propio documento, con el mismo consentimiento y método que un firmante externo',
+  })
+  selfSign(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SelfSignDto,
     @Req() request: Request,
   ) {
-    return this.documentsService.sign(user, id, dto, request);
+    return this.documentsService.selfSign(user, id, dto, request);
+  }
+
+  @Post(':id/send-for-signature')
+  @ApiOperation({ summary: 'Enviar documento a un firmante con enlace de firma' })
+  sendForSignature(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SendForSignatureDto,
+    @Req() request: Request,
+  ) {
+    return this.documentsService.sendForSignature(user, id, dto, request);
   }
 
   @Get(':id/download')

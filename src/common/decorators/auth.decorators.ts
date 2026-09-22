@@ -1,9 +1,10 @@
-import { AllowAnonymous } from '@thallesp/nestjs-better-auth';
-import { createParamDecorator, ExecutionContext } from '@nestjs/common';
+import { createParamDecorator, ExecutionContext, SetMetadata } from '@nestjs/common';
 import type { AuthUser } from '../types/database.types';
 
-/** Alias de `@AllowAnonymous()` del módulo BetterAuth. */
-export const Public = AllowAnonymous;
+export const IS_PUBLIC_KEY = 'isPublic';
+
+/** Marca una ruta como pública (sin sesión Better Auth). */
+export const Public = () => SetMetadata(IS_PUBLIC_KEY, true);
 
 export const CurrentUser = createParamDecorator(
   (_data: unknown, ctx: ExecutionContext): AuthUser => {

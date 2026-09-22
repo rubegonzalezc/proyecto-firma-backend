@@ -40,7 +40,9 @@ REVOKE ALL ON public.document_audit_events FROM anon, authenticated;
 GRANT SELECT, INSERT ON public.document_audit_events TO service_role;
 
 -- 5. Vista pública con hash para verificación de integridad
-CREATE OR REPLACE VIEW public.document_verifications AS
+DROP VIEW IF EXISTS public.document_verifications;
+
+CREATE VIEW public.document_verifications AS
 SELECT
   d.verification_code,
   d.name,

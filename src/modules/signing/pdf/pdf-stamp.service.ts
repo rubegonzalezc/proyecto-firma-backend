@@ -2,8 +2,20 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PDFDocument, PDFFont, StandardFonts, degrees, rgb } from 'pdf-lib';
 import { FieldRect, getPageBox, rectToPdfLibDraw, visualPageSize, visualPointToPdf } from './pdfCoords';
 
+/**
+ * Tipografías disponibles para la firma escrita.
+ *
+ * Son las fuentes estándar del PDF, no una caligráfica: incrustar un TTF
+ * exigiría `@pdf-lib/fontkit` y traer el binario de la fuente al repositorio.
+ * La cursiva de Times es lo más cercano a una firma que se puede componer sin
+ * eso, y una firma escrita nunca pretende parecer manuscrita: su valor está en
+ * la declaración de consentimiento, no en el grafismo.
+ */
+export type TypedFontStyle = 'clasico' | 'moderno' | 'maquina';
+
 export type StampValue =
   | { kind: 'signature'; pngBase64: string }
+  | { kind: 'typed'; text: string; style: TypedFontStyle }
   | { kind: 'text'; text: string; align?: 'left' | 'center'; bold?: boolean };
 
 export interface StampInstruction {
@@ -20,6 +32,14 @@ export interface StampResult {
 const TEXT_PADDING_PT = 2;
 const MIN_FONT_PT = 6;
 const MAX_FONT_PT = 14;
+/** La firma escrita ocupa su caja: es el grafismo, no una etiqueta. */
+const MAX_TYPED_FONT_PT = 34;
+
+const TYPED_FONT: Record<TypedFontStyle, StandardFonts> = {
+  clasico: StandardFonts.TimesRomanItalic,
+  moderno: StandardFonts.HelveticaOblique,
+  maquina: StandardFonts.CourierOblique,
+};
 
 @Injectable()
 export class PdfStampService {
@@ -49,6 +69,7 @@ export class PdfStampService {
     const dropped: string[] = [];
     let regular: PDFFont | undefined;
     let bold: PDFFont | undefined;
+    const typed: Partial<Record<TypedFontStyle, PDFFont>> = {};
 
     for (const { rect, value } of instructions) {
       const page = pages[rect.page - 1];
@@ -89,9 +110,12 @@ export class PdfStampService {
         continue;
       }
 
-      const font = value.bold
-        ? (bold ??= await doc.embedFont(StandardFonts.HelveticaBold))
-        : (regular ??= await doc.embedFont(StandardFonts.Helvetica));
+      const isTyped = value.kind === 'typed';
+      const font = isTyped
+        ? (typed[value.style] ??= await doc.embedFont(TYPED_FONT[value.style]))
+        : value.bold
+          ? (bold ??= await doc.embedFont(StandardFonts.HelveticaBold))
+          : (regular ??= await doc.embedFont(StandardFonts.Helvetica));
 
       const safe = encodeSafe(font, value.text);
       dropped.push(...safe.dropped);
@@ -99,10 +123,16 @@ export class PdfStampService {
       const { Vw, Vh } = visualPageSize(box);
       const boxWidthPt = rect.w * Vw - TEXT_PADDING_PT * 2;
       const boxHeightPt = rect.h * Vh;
-      const size = fitFontSize(font, safe.text, boxWidthPt, boxHeightPt);
+      const size = fitFontSize(
+        font,
+        safe.text,
+        boxWidthPt,
+        boxHeightPt,
+        isTyped ? MAX_TYPED_FONT_PT : MAX_FONT_PT,
+      );
       const textWidth = font.widthOfTextAtSize(safe.text, size);
-      const offsetX =
-        value.align === 'center' ? (rect.w * Vw - textWidth) / 2 : TEXT_PADDING_PT;
+      const centered = isTyped || (value.kind === 'text' && value.align === 'center');
+      const offsetX = centered ? (rect.w * Vw - textWidth) / 2 : TEXT_PADDING_PT;
       const baselineVy = rect.y * Vh + boxHeightPt / 2 + size * 0.35;
       const anchor = visualPointToPdf(rect.x * Vw + offsetX, baselineVy, box);
 
@@ -151,8 +181,14 @@ export function encodeSafe(font: PDFFont, text: string): { text: string; dropped
   return { text: out, dropped };
 }
 
-function fitFontSize(font: PDFFont, text: string, maxWidthPt: number, maxHeightPt: number): number {
-  let size = Math.min(MAX_FONT_PT, Math.max(MIN_FONT_PT, maxHeightPt * 0.8));
+function fitFontSize(
+  font: PDFFont,
+  text: string,
+  maxWidthPt: number,
+  maxHeightPt: number,
+  maxFontPt = MAX_FONT_PT,
+): number {
+  let size = Math.min(maxFontPt, Math.max(MIN_FONT_PT, maxHeightPt * 0.8));
   while (size > MIN_FONT_PT && font.widthOfTextAtSize(text, size) > maxWidthPt) {
     size -= 0.5;
   }

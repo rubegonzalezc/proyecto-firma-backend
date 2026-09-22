@@ -1,10 +1,10 @@
-import 'dotenv/config';
 import { betterAuth } from 'better-auth';
 import { Pool } from 'pg';
 
-let pool: Pool | null = null;
+let pool = null;
+let authInstance = null;
 
-function getPool(): Pool {
+function getPool() {
   if (!pool) {
     const connectionString = process.env.DATABASE_URL;
     if (!connectionString) {
@@ -15,7 +15,9 @@ function getPool(): Pool {
   return pool;
 }
 
-export function createAuth() {
+export async function getAuth() {
+  if (authInstance) return authInstance;
+
   const secret = process.env.BETTER_AUTH_SECRET;
   const baseURL = process.env.BETTER_AUTH_URL ?? 'http://localhost:3000';
 
@@ -25,14 +27,26 @@ export function createAuth() {
 
   const trustedOrigins = (process.env.CORS_ORIGINS ?? '')
     .split(',')
-    .map((o) => o.trim())
+    .map((origin) => origin.trim())
     .filter(Boolean);
 
-  return betterAuth({
+  const isProduction = process.env.NODE_ENV === 'production';
+
+  authInstance = betterAuth({
     database: getPool(),
     secret,
     baseURL,
     trustedOrigins: [baseURL, ...trustedOrigins],
+    advanced: isProduction
+      ? {
+          useSecureCookies: true,
+          defaultCookieAttributes: {
+            sameSite: 'none',
+            secure: true,
+            httpOnly: true,
+          },
+        }
+      : undefined,
     emailAndPassword: {
       enabled: true,
       minPasswordLength: 6,
@@ -57,9 +71,7 @@ export function createAuth() {
               [
                 user.id,
                 user.email,
-                (user as { fullName?: string }).fullName ??
-                  user.name ??
-                  user.email.split('@')[0],
+                user.fullName ?? user.name ?? user.email.split('@')[0],
               ],
             );
           },
@@ -67,9 +79,6 @@ export function createAuth() {
       },
     },
   });
+
+  return authInstance;
 }
-
-export type AuthInstance = ReturnType<typeof createAuth>;
-
-/** Instancia usada por NestJS y por el CLI de BetterAuth. */
-export const auth = createAuth();

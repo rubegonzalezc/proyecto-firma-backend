@@ -1,23 +1,4 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsEmail, IsNotEmpty, IsString, MaxLength } from 'class-validator';
-
-export class SignDocumentDto {
-  @ApiProperty({ example: 'Juan Pérez' })
-  @IsString()
-  @IsNotEmpty()
-  @MaxLength(120)
-  signerName!: string;
-
-  @ApiProperty({ example: 'juan@empresa.cl' })
-  @IsEmail()
-  @MaxLength(255)
-  signerEmail!: string;
-
-  @ApiProperty({ description: 'PDF firmado en base64' })
-  @IsString()
-  @IsNotEmpty()
-  signedPdfBase64!: string;
-}
 
 export class DocumentResponseDto {
   @ApiProperty()
@@ -25,6 +6,12 @@ export class DocumentResponseDto {
 
   @ApiProperty()
   name!: string;
+
+  @ApiPropertyOptional({ nullable: true })
+  folderId?: string | null;
+
+  @ApiPropertyOptional({ nullable: true })
+  folderName?: string | null;
 
   @ApiProperty({ enum: ['draft', 'signed'] })
   status!: string;

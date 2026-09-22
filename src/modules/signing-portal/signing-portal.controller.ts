@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  ForbiddenException,
   Get,
   NotFoundException,
   Param,
@@ -12,7 +13,9 @@ import {
 import { Throttle } from '@nestjs/throttler';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
-import { Public } from '../../common/decorators/auth.decorators';
+import { CurrentUser, Public } from '../../common/decorators/auth.decorators';
+import type { AuthUser } from '../../common/types/database.types';
+import { AuthService } from '../auth/auth.service';
 import { AuditService } from '../audit/audit.service';
 import { EnvelopesService } from '../envelopes/envelopes.service';
 import { activeSigners } from '../envelopes/envelope-state';
@@ -23,6 +26,10 @@ import {
   SignerSessionGuard,
   type RequestWithSigner,
 } from '../signer-access/guards/signer-session.guard';
+import { LegalService } from '../legal/legal.service';
+import { MailService } from '../mail/mail.service';
+import { otpEmail } from '../mail/mail.templates';
+import type { SignatureMethod } from '../legal/signature-levels';
 import { SigningService } from '../signing/signing.service';
 import { DeclineDto, SubmitSignatureDto, VerifyOtpDto } from './dto/portal.dto';
 
@@ -49,6 +56,9 @@ export class SigningPortalController {
     private readonly envelopes: EnvelopesService,
     private readonly signing: SigningService,
     private readonly audit: AuditService,
+    private readonly authService: AuthService,
+    private readonly legal: LegalService,
+    private readonly mail: MailService,
   ) {}
 
   /** Respuesta neutra: no revela si el sobre existe, solo si el enlace sirve. */
@@ -87,6 +97,58 @@ export class SigningPortalController {
       yourTurn: isActive,
       totalSigners: signers.length,
       signedCount: signers.filter((s) => s.status === 'signed').length,
+      ...this.signingRequirements(envelope, resolved.signer),
+    };
+  }
+
+  /**
+   * Resuelve el enlace y comprueba que pertenece a quien lo está usando.
+   *
+   * Los tres caminos con cuenta —ver, firmar y rechazar— hacían la misma
+   * comprobación copiada. Rechazar es un acto con las mismas consecuencias que
+   * firmar: no puede depender de que alguien se acuerde de repetirla.
+   */
+  private async requireOwnLink(token: string, user: AuthUser) {
+    const resolved = await this.tokens.resolve(token);
+    if (!resolved) this.notFound();
+
+    if (user.email.trim().toLowerCase() !== resolved.signer.email.trim().toLowerCase()) {
+      throw new ForbiddenException(
+        'Debes iniciar sesión con la cuenta invitada a firmar este documento.',
+      );
+    }
+
+    return resolved;
+  }
+
+  /**
+   * Qué firma exige este sobre y con qué puede cumplirla este firmante.
+   *
+   * Se devuelve en todas las vistas del portal, incluida la previa al acceso:
+   * enterarse de que hace falta el RUT y una firma dibujada después de pedir el
+   * código al correo es exactamente el momento en que la gente abandona.
+   */
+  private signingRequirements(
+    envelope: { document_type: string; required_level: string; consent_text: string | null },
+    signer: { allowed_methods: SignatureMethod[] | null; require_rut: boolean },
+  ) {
+    const rule = this.legal.rule(envelope.document_type);
+    const allowed = signer.allowed_methods?.length ? signer.allowed_methods : undefined;
+    const recommendation = this.legal.recommend(envelope.document_type);
+
+    return {
+      legal: {
+        documentType: rule.id,
+        documentTypeLabel: rule.label,
+        requiredLevel: envelope.required_level,
+        allowedMethods: allowed ?? recommendation.allowedMethods,
+        requireRut: signer.require_rut,
+        consentText: envelope.consent_text ?? recommendation.consentText,
+        obligations: rule.obligations,
+        warnings: rule.warnings,
+        legalBasis: rule.legalBasis,
+        disclaimer: recommendation.disclaimer,
+      },
     };
   }
 
@@ -98,7 +160,22 @@ export class SigningPortalController {
     const resolved = await this.tokens.resolve(token);
     if (!resolved) this.notFound();
 
+    const { envelope } = await this.envelopes.getBundle(resolved.signer.envelope_id);
     const code = await this.otp.issue(resolved.signer.id);
+
+    // El firmante está mirando la pantalla esperando el código: si el envío
+    // falla tiene que enterarse ahora, no quedarse revisando su bandeja.
+    // El código nunca vuelve en la respuesta: eso anularía el segundo factor.
+    await this.mail.send({
+      to: resolved.signer.email,
+      critical: true,
+      tag: 'otp',
+      email: otpEmail({
+        code,
+        documentName: envelope.name,
+        expiresInMinutes: this.otp.ttlMinutes,
+      }),
+    });
 
     await this.audit.record({
       envelopeId: resolved.signer.envelope_id,
@@ -108,15 +185,13 @@ export class SigningPortalController {
       request,
     });
 
-    // TODO(notificaciones): enviar por correo. Hasta que exista el proveedor,
-    // el código se registra en el log del servidor para poder probar el flujo.
-    // Nunca se devuelve en la respuesta: eso anularía el segundo factor.
-    console.log(`[OTP] ${resolved.signer.email} -> ${code}`);
-
     return {
       sentTo: maskEmail(resolved.signer.email),
       expiresInMinutes: this.otp.ttlMinutes,
       maxAttempts: this.otp.maxAttempts,
+      // En desarrollo sin proveedor, el código sale por el log del servidor;
+      // avisarlo evita que alguien espere un correo que no va a llegar.
+      deliveredByEmail: this.mail.isConfigured,
     };
   }
 
@@ -204,6 +279,7 @@ export class SigningPortalController {
           status: s.status,
           orderIndex: s.order_index,
         })),
+      ...this.signingRequirements(envelope, me),
     };
   }
 
@@ -223,12 +299,102 @@ export class SigningPortalController {
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post('session/submit')
   @ApiOperation({ summary: 'Firmar: el servidor estampa los campos del firmante' })
-  submit(@Body() dto: SubmitSignatureDto, @Req() request: RequestWithSigner) {
+  async submit(@Body() dto: SubmitSignatureDto, @Req() request: RequestWithSigner) {
+    const { signers } = await this.envelopes.getBundle(request.signer.envelopeId);
+    const me = signers.find((s) => s.id === request.signer.signerId);
+    if (!me) this.notFound();
+
     return this.signing.submitSignature({
       envelopeId: request.signer.envelopeId,
       signerId: request.signer.signerId,
-      signatureBase64: dto.signatureImageBase64,
-      fullName: dto.fullName,
+      fullName: me.full_name,
+      submission: {
+        method: dto.method,
+        consentAccepted: dto.consentAccepted,
+        // Llegó hasta aquí canjeando un código de un solo uso enviado a su
+        // correo: es la identificación más fuerte que produce la plataforma.
+        authMethod: 'email_otp',
+        signatureImageBase64: dto.signatureImageBase64,
+        typedName: dto.typedName,
+        typedStyle: dto.typedStyle,
+        rut: dto.rut,
+      },
+      request,
+    });
+  }
+
+  @Get(':token/account')
+  @ApiOperation({ summary: 'Contexto del enlace para un usuario autenticado' })
+  async accountContext(@Param('token') token: string, @CurrentUser() user: AuthUser) {
+    const resolved = await this.requireOwnLink(token, user);
+
+    const { envelope, signers } = await this.envelopes.getBundle(resolved.signer.envelope_id);
+    const profile = await this.authService.getProfile(user);
+    const displayName = profile.full_name?.trim() || user.email;
+
+    return {
+      documentName: envelope.name,
+      message: envelope.message,
+      signerName: displayName,
+      signerEmail: user.email,
+      yourTurn: activeSigners(signers, envelope.mode).some((s) => s.id === resolved.signer.id),
+      envelopeStatus: envelope.status,
+      ...this.signingRequirements(envelope, resolved.signer),
+    };
+  }
+
+  @Get(':token/account/document')
+  @ApiOperation({ summary: 'PDF actual del sobre para el firmante autenticado' })
+  async accountDocument(@Param('token') token: string, @CurrentUser() user: AuthUser) {
+    const resolved = await this.requireOwnLink(token, user);
+    const { envelope } = await this.envelopes.getBundle(resolved.signer.envelope_id);
+    const url = await this.envelopes.signedUrl(envelope.current_pdf_path, 300);
+    return { url, expiresIn: 300 };
+  }
+
+  @Post(':token/account/submit')
+  @ApiOperation({ summary: 'Firmar con la cuenta invitada, eligiendo el método de firma' })
+  async accountSubmit(
+    @Param('token') token: string,
+    @Body() dto: SubmitSignatureDto,
+    @CurrentUser() user: AuthUser,
+    @Req() request: Request,
+  ) {
+    const resolved = await this.requireOwnLink(token, user);
+    const profile = await this.authService.getProfile(user);
+    const displayName = profile.full_name?.trim() || user.email;
+
+    return this.signing.submitSignature({
+      envelopeId: resolved.signer.envelope_id,
+      signerId: resolved.signer.id,
+      fullName: displayName,
+      submission: {
+        method: dto.method,
+        consentAccepted: dto.consentAccepted,
+        authMethod: 'account_password',
+        signatureImageBase64: dto.signatureImageBase64,
+        typedName: dto.typedName,
+        typedStyle: dto.typedStyle,
+        rut: dto.rut,
+      },
+      request,
+    });
+  }
+
+  @Post(':token/account/decline')
+  @ApiOperation({ summary: 'Rechazar la firma con la cuenta invitada' })
+  async accountDecline(
+    @Param('token') token: string,
+    @Body() dto: DeclineDto,
+    @CurrentUser() user: AuthUser,
+    @Req() request: Request,
+  ) {
+    const resolved = await this.requireOwnLink(token, user);
+
+    return this.signing.decline({
+      envelopeId: resolved.signer.envelope_id,
+      signerId: resolved.signer.id,
+      reason: dto.reason,
       request,
     });
   }
