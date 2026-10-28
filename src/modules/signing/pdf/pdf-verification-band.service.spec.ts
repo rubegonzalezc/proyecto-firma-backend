@@ -2,6 +2,8 @@ import { PDFDocument, StandardFonts } from 'pdf-lib';
 import {
   formatSignersBandLine,
   PdfVerificationBandService,
+  placeBandRuns,
+  VERIFICATION_BAND_WIDTH,
 } from './pdf-verification-band.service';
 
 async function contract(pages = 1): Promise<Buffer> {
@@ -21,10 +23,35 @@ describe('formatSignersBandLine', () => {
   });
 });
 
+describe('placeBandRuns', () => {
+  it('separa los tramos por su ancho real y no los deja cruzarse', async () => {
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    const placed = placeBandRuns(
+      [
+        { text: 'Firmado electrónicamente', font, size: 8 },
+        { text: 'A1B2-C3D4-E5F6', font, size: 8 },
+        { text: 'Ana Rojas · Luis Soto', font, size: 8 },
+      ],
+      780,
+      70,
+      10,
+    );
+
+    expect(placed).toHaveLength(3);
+    for (let i = 0; i < placed.length - 1; i++) {
+      const end = placed[i].y - font.widthOfTextAtSize(placed[i].text, placed[i].size);
+      expect(end).toBeGreaterThanOrEqual(placed[i + 1].y + 10 - 0.01);
+    }
+    const last = placed[placed.length - 1];
+    expect(last.y - font.widthOfTextAtSize(last.text, last.size)).toBeGreaterThanOrEqual(70);
+  });
+});
+
 describe('PdfVerificationBandService', () => {
   const service = new PdfVerificationBandService();
 
-  it('estampa el carril en cada página del cuerpo', async () => {
+  it('desplaza el contrato y reserva la franja izquierda', async () => {
     const original = await contract(2);
     const out = await service.apply(original, {
       verificationCode: 'A1B2-C3D4-E5F6',
@@ -34,6 +61,9 @@ describe('PdfVerificationBandService', () => {
 
     const doc = await PDFDocument.load(out);
     expect(doc.getPageCount()).toBe(2);
+    const page = doc.getPage(0);
+    expect(page.getWidth()).toBeCloseTo(612 + VERIFICATION_BAND_WIDTH, 1);
+    expect(page.getHeight()).toBeCloseTo(792, 1);
   });
 
   it('no altera el número de páginas', async () => {
