@@ -10,14 +10,14 @@ export interface VerificationBandData {
 }
 
 /**
- * Franja añadida a la izquierda. El contrato se desplaza; no se pinta encima.
- * 56 pt ≈ 20 mm: cabe un QR legible y una columna de texto vertical.
+ * Franja gris a la izquierda, donde va el QR. 48 pt deja el código legible
+ * sin comerse tanto margen del contrato.
  */
-export const VERIFICATION_BAND_WIDTH = 56;
+export const VERIFICATION_BAND_WIDTH = 48;
 
-const QR_SIZE = 42;
-const EDGE = 10;
-const TEXT_X = 14;
+const QR_SIZE = 36;
+const EDGE = 8;
+const TEXT_X = 10;
 const GAP = 10;
 const QR_RENDER_PX = 180;
 
