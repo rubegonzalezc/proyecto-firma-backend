@@ -20,6 +20,7 @@ import {
   nextSignerToActivate,
 } from '../envelopes/envelope-state';
 import { CertificateService } from './pdf/certificate.service';
+import { PdfVerificationBandService } from './pdf/pdf-verification-band.service';
 import { PdfStampService, type StampInstruction } from './pdf/pdf-stamp.service';
 import {
   validateSubmission,
@@ -43,6 +44,7 @@ export class SigningService {
     private readonly supabase: SupabaseService,
     private readonly envelopes: EnvelopesService,
     private readonly stamper: PdfStampService,
+    private readonly verificationBand: PdfVerificationBandService,
     private readonly certificates: CertificateService,
     private readonly audit: AuditService,
     private readonly documentAudit: DocumentAuditService,
@@ -366,7 +368,13 @@ export class SigningService {
 
     const rule = this.legal.rule(params.envelope.document_type);
 
-    const finalBytes = await this.certificates.append(params.stampedBytes, {
+    const bandedBytes = await this.verificationBand.apply(params.stampedBytes, {
+      verificationCode,
+      verifyUrl,
+      signerNames: params.signers.map((s) => s.full_name),
+    });
+
+    const finalBytes = await this.certificates.append(bandedBytes, {
       documentName: params.name,
       verificationCode,
       verifyUrl,

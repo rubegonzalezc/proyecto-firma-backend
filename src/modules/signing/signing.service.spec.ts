@@ -10,6 +10,7 @@ import { MailService } from '../mail/mail.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import type { SignatureSubmission } from './signature-submission';
 import { CertificateService } from './pdf/certificate.service';
+import { PdfVerificationBandService } from './pdf/pdf-verification-band.service';
 import { PdfStampService } from './pdf/pdf-stamp.service';
 import { SigningService, initialsOf } from './signing.service';
 
@@ -138,6 +139,7 @@ async function setup(mode: 'sequential' | 'parallel') {
     db.asService(),
     envelopes,
     new PdfStampService(),
+    new PdfVerificationBandService(),
     new CertificateService(),
     new AuditService(db.asService()),
     new DocumentAuditService(db.asService()),
