@@ -1,15 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { PDFDocument, PDFFont, PDFPage, StandardFonts, degrees, rgb } from 'pdf-lib';
 import * as QRCode from 'qrcode';
-import { wrap } from './certificate.service';
 import { encodeSafe } from './pdf-stamp.service';
-import {
-  getPageBox,
-  rectToPdfLibDraw,
-  visualPageSize,
-  visualPointToPdf,
-  type FieldRect,
-} from './pdfCoords';
 
 export interface VerificationBandData {
   verificationCode: string;
@@ -17,22 +9,26 @@ export interface VerificationBandData {
   signerNames: string[];
 }
 
-/** Ancho del carril en el espacio visual (pt). */
-const BAND_WIDTH = 40;
-const BAND_PADDING = 4;
-const QR_SIZE = 34;
-const QR_RENDER_PX = 180;
-const FONT_BODY = 5;
-const FONT_CODE = 5.5;
-const LINE_LEADING = 1.45;
+/**
+ * Franja añadida a la izquierda. El contrato se desplaza; no se pinta encima.
+ * 56 pt ≈ 20 mm: cabe un QR legible y una columna de texto vertical.
+ */
+export const VERIFICATION_BAND_WIDTH = 56;
 
-const MUTED = rgb(0.42, 0.43, 0.51);
+const QR_SIZE = 42;
+const EDGE = 10;
+const TEXT_X = 14;
+const GAP = 10;
+const QR_RENDER_PX = 180;
+
+const STRIP = rgb(0.96, 0.96, 0.98);
 const INK = rgb(0.08, 0.09, 0.16);
-const HAIRLINE = rgb(0.87, 0.85, 0.96);
+const MUTED = rgb(0.42, 0.43, 0.51);
+const HAIRLINE = rgb(0.82, 0.83, 0.88);
 
 const LABEL = 'Firmado electrónicamente';
 
-/** Resume firmantes para el margen estrecho. */
+/** Resume firmantes para el margen. */
 export function formatSignersBandLine(names: string[]): string {
   const trimmed = names.map((n) => n.trim()).filter(Boolean);
   if (trimmed.length === 0) return '';
@@ -41,23 +37,59 @@ export function formatSignersBandLine(names: string[]): string {
   return `${trimmed[0]} · ${trimmed[1]} +${trimmed.length - 2}`;
 }
 
-function truncate(value: string, max: number): string {
-  if (value.length <= max) return value;
-  return `${value.slice(0, max - 1)}…`;
+interface BandRun {
+  text: string;
+  font: PDFFont;
+  size: number;
+  color: ReturnType<typeof rgb>;
 }
 
-function lineHeight(size: number): number {
-  return size * LINE_LEADING;
+/**
+ * Coloca cada texto en su propio tramo vertical, medido con el ancho real
+ * de la fuente. `rotate: 270` hace que el texto baje desde `y` sin cruzarse
+ * con el siguiente tramo ni con el QR.
+ */
+export function placeBandRuns(
+  runs: Array<{ text: string; font: PDFFont; size: number }>,
+  top: number,
+  bottom: number,
+  gap: number,
+): Array<{ text: string; y: number; size: number }> {
+  const placed: Array<{ text: string; y: number; size: number }> = [];
+  let y = top;
+
+  for (const run of runs) {
+    const width = run.font.widthOfTextAtSize(run.text, run.size);
+    if (width <= 0) continue;
+    if (y - width < bottom) break;
+    placed.push({ text: run.text, y, size: run.size });
+    y -= width + gap;
+  }
+
+  return placed;
+}
+
+function shortenToWidth(font: PDFFont, text: string, size: number, maxWidth: number): string {
+  if (font.widthOfTextAtSize(text, size) <= maxWidth) return text;
+  let end = text.length;
+  while (end > 1 && font.widthOfTextAtSize(`${text.slice(0, end)}…`, size) > maxWidth) {
+    end -= 1;
+  }
+  return `${text.slice(0, end)}…`;
 }
 
 @Injectable()
 export class PdfVerificationBandService {
   /**
-   * Carril izquierdo con textos horizontales apilados (sin rotación) para evitar
-   * superposición de glifos, más QR pequeño al pie de la franja.
+   * Añade una franja de identificación a la izquierda de cada página y
+   * desplaza el contenido original. Así el código, los firmantes y el QR
+   * no tapan cláusulas ni se pisan entre sí.
    */
   async apply(pdf: Buffer | Uint8Array, data: VerificationBandData): Promise<Buffer> {
-    const doc = await PDFDocument.load(pdf);
+    const source = await PDFDocument.load(pdf);
+    const doc = await PDFDocument.create();
+    const embedded = await doc.embedPages(source.getPages());
+
     const regular = await doc.embedFont(StandardFonts.Helvetica);
     const bold = await doc.embedFont(StandardFonts.HelveticaBold);
 
@@ -67,115 +99,100 @@ export class PdfVerificationBandService {
       color: { dark: '#141628', light: '#FFFFFF' },
     });
     const qrPng = await doc.embedPng(Buffer.from(qrDataUrl.split(',')[1], 'base64'));
+    const signers = formatSignersBandLine(data.signerNames);
 
-    const signersLine = truncate(formatSignersBandLine(data.signerNames), 40);
-    const pages = doc.getPages();
-
-    for (let index = 0; index < pages.length; index++) {
-      this.drawBand(
-        pages[index],
-        regular,
-        bold,
-        qrPng,
-        data.verificationCode,
-        signersLine,
-        index + 1,
-      );
+    for (const page of embedded) {
+      const sheet = doc.addPage([page.width + VERIFICATION_BAND_WIDTH, page.height]);
+      sheet.drawPage(page, {
+        x: VERIFICATION_BAND_WIDTH,
+        y: 0,
+        width: page.width,
+        height: page.height,
+      });
+      this.drawGutter(sheet, page.height, regular, bold, qrPng, data.verificationCode, signers);
     }
 
     return Buffer.from(await doc.save());
   }
 
-  private drawBand(
+  private drawGutter(
     page: PDFPage,
+    pageHeight: number,
     regular: PDFFont,
     bold: PDFFont,
     qr: Awaited<ReturnType<PDFDocument['embedPng']>>,
     verificationCode: string,
     signersLine: string,
-    pageNumber: number,
   ): void {
-    const box = getPageBox(page);
-    const { Vw, Vh } = visualPageSize(box);
-    const maxTextWidth = BAND_WIDTH - BAND_PADDING * 2;
-
-    const lineTop = visualPointToPdf(BAND_WIDTH, 0, box);
-    const lineBottom = visualPointToPdf(BAND_WIDTH, Vh, box);
+    page.drawRectangle({
+      x: 0,
+      y: 0,
+      width: VERIFICATION_BAND_WIDTH,
+      height: pageHeight,
+      color: STRIP,
+    });
     page.drawLine({
-      start: lineTop,
-      end: lineBottom,
-      thickness: 0.75,
+      start: { x: VERIFICATION_BAND_WIDTH, y: 0 },
+      end: { x: VERIFICATION_BAND_WIDTH, y: pageHeight },
+      thickness: 0.6,
       color: HAIRLINE,
     });
 
-    const qrRect: FieldRect = {
-      page: pageNumber,
-      x: BAND_PADDING / Vw,
-      y: 1 - (BAND_PADDING + QR_SIZE) / Vh,
-      w: QR_SIZE / Vw,
-      h: QR_SIZE / Vh,
-    };
-    const qrDraw = rectToPdfLibDraw(qrRect, box);
-    page.drawImage(qr, {
-      x: qrDraw.x,
-      y: qrDraw.y,
-      width: qrDraw.width,
-      height: qrDraw.height,
-      rotate: degrees(qrDraw.rotate),
-    });
+    const qrX = (VERIFICATION_BAND_WIDTH - QR_SIZE) / 2;
+    const qrY = EDGE;
+    page.drawImage(qr, { x: qrX, y: qrY, width: QR_SIZE, height: QR_SIZE });
 
-    const textBlocks: Array<{ lines: string[]; size: number; font: PDFFont; color: ReturnType<typeof rgb> }> =
-      [
-        {
-          lines: wrap(bold, LABEL, FONT_BODY, maxTextWidth),
-          size: FONT_BODY,
-          font: bold,
-          color: INK,
-        },
-        {
-          lines: wrap(bold, verificationCode, FONT_CODE, maxTextWidth),
-          size: FONT_CODE,
-          font: bold,
-          color: MUTED,
-        },
-      ];
+    const top = pageHeight - EDGE;
+    const bottom = qrY + QR_SIZE + 12;
+    const available = Math.max(0, top - bottom);
 
+    const runs: BandRun[] = [
+      { text: LABEL, font: bold, size: 8, color: INK },
+      { text: verificationCode, font: bold, size: 7.5, color: MUTED },
+    ];
     if (signersLine) {
-      textBlocks.push({
-        lines: wrap(regular, signersLine, FONT_BODY, maxTextWidth),
-        size: FONT_BODY,
+      runs.push({
+        text: shortenToWidth(regular, encodeSafe(regular, signersLine).text, 7, available),
         font: regular,
+        size: 7,
         color: MUTED,
       });
     }
 
-    const qrZoneTopVy = Vh - BAND_PADDING - QR_SIZE - 6;
-    let vy = BAND_PADDING + 2;
+    const encoded = runs.map((run) => ({
+      ...run,
+      text: encodeSafe(run.font, run.text).text,
+    }));
 
-    for (const block of textBlocks) {
-      if (vy + block.lines.length * lineHeight(block.size) > qrZoneTopVy) break;
+    let sizeScale = 1;
+    const fits = (scale: number) => {
+      const width =
+        encoded.reduce(
+          (sum, run) => sum + run.font.widthOfTextAtSize(run.text, run.size * scale),
+          0,
+        ) +
+        GAP * Math.max(0, encoded.length - 1);
+      return width <= available;
+    };
+    while (sizeScale > 0.72 && !fits(sizeScale)) sizeScale -= 0.08;
 
-      for (const line of block.lines) {
-        if (vy + lineHeight(block.size) > qrZoneTopVy) break;
-        this.drawBandLine(page, box, BAND_PADDING, vy, line, block.size, block.font, block.color);
-        vy += lineHeight(block.size);
-      }
+    const placed = placeBandRuns(
+      encoded.map((run) => ({ ...run, size: run.size * sizeScale })),
+      top,
+      bottom,
+      GAP,
+    );
 
-      vy += 3;
+    for (const item of placed) {
+      const source = encoded.find((run) => run.text === item.text);
+      page.drawText(item.text, {
+        x: TEXT_X,
+        y: item.y,
+        size: item.size,
+        font: source?.font ?? regular,
+        color: source?.color ?? MUTED,
+        rotate: degrees(270),
+      });
     }
-  }
-
-  private drawBandLine(
-    page: PDFPage,
-    box: ReturnType<typeof getPageBox>,
-    vx: number,
-    vy: number,
-    text: string,
-    size: number,
-    font: PDFFont,
-    color: ReturnType<typeof rgb>,
-  ): void {
-    const { x, y } = visualPointToPdf(vx, vy, box);
-    page.drawText(encodeSafe(font, text).text, { x, y, size, font, color });
   }
 }
