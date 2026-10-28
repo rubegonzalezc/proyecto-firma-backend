@@ -103,7 +103,10 @@ export class SigningService {
           break;
 
         case 'name':
-          instructions.push({ rect, value: { kind: 'text', text: displayName } });
+        case 'date':
+          // El nombre y la fecha no se estampan en la página de la firma.
+          // Quedan en la hoja de certificación, para no repetir
+          // «Nombre 28-10-2026» junto al trazo.
           break;
 
         case 'rut':
@@ -114,10 +117,6 @@ export class SigningService {
             // fallida: se deja constancia en vez de romper el flujo entero.
             this.logger.warn(`Campo de RUT sin valor declarado en el campo ${field.id}`);
           }
-          break;
-
-        case 'date':
-          instructions.push({ rect, value: { kind: 'text', text: santiagoDate() } });
           break;
 
         default:
