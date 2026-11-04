@@ -84,9 +84,11 @@ export class SigningService {
       };
 
       switch (field.type) {
-        case 'signature':
-          instructions.push({ rect, value: this.markFor(submission, displayName, signaturePng) });
+        case 'signature': {
+          const mark = this.markFor(signaturePng);
+          if (mark) instructions.push({ rect, value: mark });
           break;
+        }
 
         case 'initials':
           // Las iniciales van en cajas pequeñas al pie de cada página: meter ahí
@@ -129,19 +131,13 @@ export class SigningService {
     return instructions;
   }
 
-  /** La marca de firma propiamente tal, según el método elegido. */
-  private markFor(
-    submission: ValidatedSubmission,
-    displayName: string,
-    signaturePng: string | undefined,
-  ): StampInstruction['value'] {
-    if (signaturePng) return { kind: 'signature', pngBase64: signaturePng };
-
-    if (submission.method === 'type' && submission.typedName) {
-      return { kind: 'typed', text: submission.typedName, style: submission.typedStyle };
-    }
-
-    return { kind: 'text', text: displayName, align: 'center', bold: true };
+  /**
+   * Grafismo de la firma. El nombre no se imprime en la página del contrato:
+   * va en la franja de verificación y en la hoja de certificación.
+   */
+  private markFor(signaturePng: string | undefined): StampInstruction['value'] | null {
+    if (!signaturePng) return null;
+    return { kind: 'signature', pngBase64: signaturePng };
   }
 
   /**
